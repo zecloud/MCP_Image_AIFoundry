@@ -208,7 +208,7 @@ __marimo__/
 
 # Azure Functions
 local.settings.json
-.vscode/
+
 .python_packages/
 __blobstorage__/
 __queuestorage__/
