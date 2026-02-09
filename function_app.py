@@ -2,57 +2,63 @@ import azure.functions as func
 import logging
 import json
 import os
-from typing import Optional
-import asyncio
+from pydantic import BaseModel, Field
+from AzureFunctionsMCPPydanticTool import pydantic_to_tool_properties
 
-app = func.FunctionApp()
+app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
-@app.function_name(name="MCPImageGenerator")
-@app.route(route="mcp/image/generate", methods=["POST"], auth_level=func.AuthLevel.FUNCTION)
-async def mcp_image_generator(req: func.HttpRequest) -> func.HttpResponse:
+
+# Pydantic model for image generation request
+class ImageGenerationRequest(BaseModel):
+    """Request model for image generation using Flux Pro 2"""
+    prompt: str = Field(..., description="The text description of the image to generate")
+    size: str = Field(default="1024x1024", description="The size of the generated image (e.g., '1024x1024')")
+    quality: str = Field(default="standard", description="The quality of the generated image")
+    n: int = Field(default=1, description="The number of images to generate")
+
+
+# Convert Pydantic model to tool properties JSON
+tool_properties_json = pydantic_to_tool_properties(ImageGenerationRequest)
+
+
+@app.generic_trigger(
+    arg_name="context",
+    type="mcpToolTrigger",
+    toolName="generate_image",
+    description="Generate images using Flux Pro 2 model via Azure AI Foundry. Provide a text prompt describing the image you want to create.",
+    toolProperties=tool_properties_json,
+)
+async def generate_image(context) -> str:
     """
     Azure Function with MCP trigger that generates images using Flux Pro 2
     via Azure AI Foundry.
     
-    Expected request body:
-    {
-        "prompt": "A description of the image to generate",
-        "size": "1024x1024",  # Optional, defaults to "1024x1024"
-        "quality": "standard",  # Optional, defaults to "standard"
-        "n": 1  # Optional, number of images to generate, defaults to 1
-    }
-    
+    Args:
+        context: The MCP tool invocation context containing the request arguments
+        
     Returns:
-    {
-        "status": "success",
-        "images": [
-            {
-                "url": "https://...",
-                "revised_prompt": "..."
-            }
-        ]
-    }
+        str: JSON string with the generated image URLs and metadata
     """
     logging.info('MCP Image Generator function received a request.')
     
     try:
-        # Parse request body
-        req_body = req.get_json()
-        logging.info(f"Request body: {json.dumps(req_body)}")
+        # Parse the context to extract arguments
+        content = json.loads(context)
+        arguments = content.get("arguments", {})
         
-        # Extract parameters
-        prompt = req_body.get('prompt')
-        size = req_body.get('size', '1024x1024')
-        quality = req_body.get('quality', 'standard')
-        n = req_body.get('n', 1)
+        logging.info(f"Request arguments: {json.dumps(arguments)}")
+        
+        # Extract parameters from arguments
+        prompt = arguments.get('prompt')
+        size = arguments.get('size', '1024x1024')
+        quality = arguments.get('quality', 'standard')
+        n = arguments.get('n', 1)
         
         # Validate required parameters
         if not prompt:
-            return func.HttpResponse(
-                json.dumps({"error": "Missing required parameter: prompt"}),
-                status_code=400,
-                mimetype="application/json"
-            )
+            error_msg = "Missing required parameter: prompt"
+            logging.error(error_msg)
+            return json.dumps({"error": error_msg})
         
         # Get Azure OpenAI credentials from environment variables
         endpoint = os.environ.get('AZURE_OPENAI_ENDPOINT')
@@ -60,23 +66,17 @@ async def mcp_image_generator(req: func.HttpRequest) -> func.HttpResponse:
         deployment_name = os.environ.get('AZURE_OPENAI_DEPLOYMENT_NAME', 'flux-pro-2')
         
         if not endpoint or not api_key:
-            logging.error("Azure OpenAI credentials not configured")
-            return func.HttpResponse(
-                json.dumps({"error": "Azure OpenAI credentials not configured"}),
-                status_code=500,
-                mimetype="application/json"
-            )
+            error_msg = "Azure OpenAI credentials not configured"
+            logging.error(error_msg)
+            return json.dumps({"error": error_msg})
         
         # Import the image generation client
         try:
             from azureopenaigptimageclient import AzureOpenAIImageClient
         except ImportError as e:
-            logging.error(f"Failed to import AzureOpenAIImageClient: {str(e)}")
-            return func.HttpResponse(
-                json.dumps({"error": f"Image client library not available: {str(e)}"}),
-                status_code=500,
-                mimetype="application/json"
-            )
+            error_msg = f"Image client library not available: {str(e)}"
+            logging.error(error_msg)
+            return json.dumps({"error": error_msg})
         
         # Initialize the image client
         logging.info(f"Initializing Azure OpenAI Image Client for deployment: {deployment_name}")
@@ -104,42 +104,42 @@ async def mcp_image_generator(req: func.HttpRequest) -> func.HttpResponse:
             "created": result.get('created'),
         }
         
-        return func.HttpResponse(
-            json.dumps(response),
-            status_code=200,
-            mimetype="application/json"
-        )
+        return json.dumps(response)
         
     except ValueError as e:
-        logging.error(f"Invalid request body: {str(e)}")
-        return func.HttpResponse(
-            json.dumps({"error": f"Invalid request body: {str(e)}"}),
-            status_code=400,
-            mimetype="application/json"
-        )
+        error_msg = f"Invalid request: {str(e)}"
+        logging.error(error_msg)
+        return json.dumps({"error": error_msg})
     except Exception as e:
-        logging.error(f"Error generating image: {str(e)}", exc_info=True)
-        return func.HttpResponse(
-            json.dumps({"error": f"Internal server error: {str(e)}"}),
-            status_code=500,
-            mimetype="application/json"
-        )
+        error_msg = f"Error generating image: {str(e)}"
+        logging.error(error_msg, exc_info=True)
+        return json.dumps({"error": error_msg})
 
 
-@app.function_name(name="MCPHealthCheck")
-@app.route(route="mcp/health", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
-async def mcp_health_check(req: func.HttpRequest) -> func.HttpResponse:
+@app.generic_trigger(
+    arg_name="context",
+    type="mcpToolTrigger",
+    toolName="health_check",
+    description="Check the health status of the MCP Image Generator service.",
+    toolProperties="[]",
+)
+async def health_check(context) -> str:
     """
     Health check endpoint for MCP service
-    """
-    logging.info('MCP Health Check endpoint called.')
     
-    return func.HttpResponse(
-        json.dumps({
-            "status": "healthy",
-            "service": "MCP Image Generator",
-            "version": "1.0.0"
-        }),
-        status_code=200,
-        mimetype="application/json"
-    )
+    Args:
+        context: The MCP tool invocation context
+        
+    Returns:
+        str: JSON string with service health status
+    """
+    logging.info('MCP Health Check tool called.')
+    
+    response = {
+        "status": "healthy",
+        "service": "MCP Image Generator",
+        "version": "1.0.0"
+    }
+    
+    return json.dumps(response)
+

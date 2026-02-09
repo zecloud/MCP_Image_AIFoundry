@@ -4,21 +4,22 @@ MCP (Model Context Protocol) remote server on Azure Functions for generating ima
 
 ## Overview
 
-This Azure Function application provides an HTTP-triggered endpoint that generates images using the Flux Pro 2 model via Azure AI Foundry. It uses the Python V2 programming model for Azure Functions and performs asynchronous image generation.
+This Azure Function application provides an MCP tool trigger endpoint that generates images using the Flux Pro 2 model via Azure AI Foundry. It uses the Python V2 programming model for Azure Functions with MCP binding and Pydantic for strong typing of tool properties.
 
 ## Features
 
 - **Azure Functions Python V2**: Modern programming model with async support
-- **MCP HTTP Trigger**: RESTful API endpoint for image generation requests
+- **MCP Tool Trigger**: Native MCP binding for Model Context Protocol integration
+- **Pydantic Strong Typing**: Type-safe tool properties using Pydantic models
 - **Flux Pro 2 Integration**: Uses Azure OpenAI Image Client for Flux Pro 2 model
 - **Async Image Generation**: Non-blocking asynchronous image generation
 - **Error Handling**: Comprehensive error handling and logging
-- **Health Check**: Dedicated health check endpoint
+- **Health Check**: Dedicated health check MCP tool
 
 ## Prerequisites
 
 - Python 3.8 or higher
-- Azure Functions Core Tools
+- Azure Functions Core Tools v4
 - Azure subscription with Azure AI Foundry access
 - Azure OpenAI resource with Flux Pro 2 deployment
 
@@ -48,9 +49,9 @@ Run the function locally:
 func start
 ```
 
-The function will be available at:
-- Image Generation: `http://localhost:7071/api/mcp/image/generate`
-- Health Check: `http://localhost:7071/api/mcp/health`
+The MCP server will expose the following tools:
+- `generate_image` - Generate images using Flux Pro 2
+- `health_check` - Check service health status
 
 ## Testing
 
@@ -69,27 +70,32 @@ The test script will:
 2. Send a test image generation request
 3. Display the results
 
-## API Usage
+## MCP Tool Usage
 
-### Generate Image
+### Generate Image Tool
 
-**Endpoint:** `POST /api/mcp/image/generate`
+**Tool Name:** `generate_image`
 
-**Request Body:**
+**Description:** Generate images using Flux Pro 2 model via Azure AI Foundry. Provide a text prompt describing the image you want to create.
+
+**Tool Properties:**
+- `prompt` (required, string): Text description of the image to generate
+- `size` (optional, string): Image size, default is "1024x1024"
+- `quality` (optional, string): Image quality, default is "standard"
+- `n` (optional, number): Number of images to generate, default is 1
+
+**Example MCP Tool Call:**
 ```json
 {
-  "prompt": "A beautiful sunset over mountains",
-  "size": "1024x1024",
-  "quality": "standard",
-  "n": 1
+  "name": "generate_image",
+  "arguments": {
+    "prompt": "A beautiful sunset over mountains",
+    "size": "1024x1024",
+    "quality": "standard",
+    "n": 1
+  }
 }
 ```
-
-**Parameters:**
-- `prompt` (required): Text description of the image to generate
-- `size` (optional): Image size, default is "1024x1024"
-- `quality` (optional): Image quality, default is "standard"
-- `n` (optional): Number of images to generate, default is 1
 
 **Response:**
 ```json
@@ -105,9 +111,11 @@ The test script will:
 }
 ```
 
-### Health Check
+### Health Check Tool
 
-**Endpoint:** `GET /api/mcp/health`
+**Tool Name:** `health_check`
+
+**Description:** Check the health status of the MCP Image Generator service.
 
 **Response:**
 ```json
@@ -135,20 +143,37 @@ Make sure to configure the application settings in Azure:
 
 ```
 MCP_Image_AIFoundry/
-├── function_app.py          # Main function app with MCP trigger
+├── function_app.py          # Main function app with MCP tool triggers
 ├── host.json                # Function app host configuration
 ├── local.settings.json      # Local development settings (gitignored)
 ├── requirements.txt         # Python dependencies
-├── test_function.py         # Test script for the function
+├── test_function.py         # Test script for validation
 ├── .env.example            # Example environment configuration
-├── .funcignore             # Files to exclude from deployment
+├── .funcignore             # Deployment filtering
+├── .gitignore              # Git ignore rules
 └── README.md               # This file
 ```
 
 ## Dependencies
 
-- `azure-functions`: Azure Functions Python worker
+- `azure-functions>=1.18.0`: Azure Functions Python worker
 - `azureopenaigptimageclient`: Azure OpenAI Image Client for Flux Pro 2
+- `azurefunctionsmcpydantic`: Pydantic to MCP tool properties converter
+- `pydantic>=2.0.0`: Data validation and settings management
+- `requests>=2.31.0`: HTTP library for testing
+
+## Technical Details
+
+### MCP Tool Binding
+
+This project uses the native MCP tool trigger binding for Azure Functions, which provides:
+- Automatic tool registration in the MCP protocol
+- Strong typing through Pydantic models
+- Seamless integration with MCP clients and agents
+
+### Pydantic Models
+
+Tool properties are defined using Pydantic models and automatically converted to MCP tool properties format using the `azurefunctionsmcpydantic` package. This ensures type safety and better developer experience.
 
 ## License
 
