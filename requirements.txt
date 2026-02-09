@@ -1,3 +1,3 @@
-azure-functions
+azure-functions>=1.18.0,<2.0.0
 git+https://github.com/zecloud/azureopenaigptimageclient.git#subdirectory=Image
-requests
+requests>=2.31.0,<3.0.0
