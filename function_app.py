@@ -14,9 +14,9 @@ urlstorage=os.environ.get('AgentVideoStorage__blobServiceUri', '')
 class ImageGenerationRequest(BaseModel):
     """Request model for image generation using Flux Pro 2"""
     prompt: str = Field(..., description="The text description of the image to generate")
-    size: str = Field(default="1024x1024", description="The size of the generated image (e.g., '1024x1024')")
-    quality: str = Field(default="standard", description="The quality of the generated image")
-    n: int = Field(default=1, description="The number of images to generate")
+    size: Optional[str] = Field(default="1024x1024", description="The size of the generated image (e.g., '1024x1024')")
+    quality: Optional[str] = Field(default="standard", description="The quality of the generated image")
+    n: Optional[int] = Field(default=1, description="The number of images to generate")
     video_id: Optional[str] = Field(default="", description="video ID for associating generated images with a video")
     scene_number: Optional[int] = Field(default=None, description="Scene number for associating generated images with a specific scene in a video")
     talk_number: Optional[int] = Field(default=None, description="Talk number for associating generated images with a specific talk in a video")
