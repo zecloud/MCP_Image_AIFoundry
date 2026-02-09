@@ -37,10 +37,19 @@ pip install -r requirements.txt
 ```
 
 3. Configure local settings:
-   - Copy `local.settings.json` and update the following values:
-     - `AZURE_OPENAI_ENDPOINT`: Your Azure OpenAI endpoint URL
-     - `AZURE_OPENAI_API_KEY`: Your Azure OpenAI API key
-     - `AZURE_OPENAI_DEPLOYMENT_NAME`: Your Flux Pro 2 deployment name (default: "flux-pro-2")
+   - Create a `local.settings.json` file in the project root with the following content:
+     ```json
+     {
+       "IsEncrypted": false,
+       "Values": {
+         "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+         "FUNCTIONS_WORKER_RUNTIME": "python",
+         "AZURE_OPENAI_ENDPOINT": "<your Azure OpenAI endpoint URL>",
+         "AZURE_OPENAI_API_KEY": "<your Azure OpenAI API key>",
+         "AZURE_OPENAI_DEPLOYMENT_NAME": "flux-pro-2"
+       }
+     }
+     ```
 
 ## Local Development
 
