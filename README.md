@@ -52,6 +52,23 @@ The function will be available at:
 - Image Generation: `http://localhost:7071/api/mcp/image/generate`
 - Health Check: `http://localhost:7071/api/mcp/health`
 
+## Testing
+
+A test script is provided to verify the function works correctly:
+
+```bash
+# Make sure the function is running locally
+func start
+
+# In another terminal, run the test script
+python test_function.py
+```
+
+The test script will:
+1. Check the health endpoint
+2. Send a test image generation request
+3. Display the results
+
 ## API Usage
 
 ### Generate Image
@@ -120,8 +137,11 @@ Make sure to configure the application settings in Azure:
 MCP_Image_AIFoundry/
 ├── function_app.py          # Main function app with MCP trigger
 ├── host.json                # Function app host configuration
-├── local.settings.json      # Local development settings
+├── local.settings.json      # Local development settings (gitignored)
 ├── requirements.txt         # Python dependencies
+├── test_function.py         # Test script for the function
+├── .env.example            # Example environment configuration
+├── .funcignore             # Files to exclude from deployment
 └── README.md               # This file
 ```
 
