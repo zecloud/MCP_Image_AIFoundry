@@ -13,7 +13,6 @@ Usage:
 
 import requests
 import json
-import os
 
 # Configuration for local testing
 # The MCP trigger uses the standard Azure Functions runtime endpoints
