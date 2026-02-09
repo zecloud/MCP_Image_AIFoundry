@@ -77,7 +77,7 @@ async def generate_image(context) -> str:
         
         # Import the image generation client
         try:
-            from azureopenaigptimageclient import AzureOpenAIImageClient
+            from FoundryImageClient import GptImageClient
         except ImportError as e:
             error_msg = f"Image client library not available: {str(e)}"
             logging.error(error_msg)
@@ -85,7 +85,7 @@ async def generate_image(context) -> str:
         
         # Initialize the image client
         logging.info(f"Initializing Azure OpenAI Image Client for deployment: {deployment_name}")
-        client = AzureOpenAIImageClient(
+        client = GptImageClient(
             endpoint=endpoint,
             api_key=api_key,
             deployment_name=deployment_name
@@ -121,30 +121,30 @@ async def generate_image(context) -> str:
         return json.dumps({"error": error_msg})
 
 
-@app.generic_trigger(
-    arg_name="context",
-    type="mcpToolTrigger",
-    toolName="health_check",
-    description="Check the health status of the MCP Image Generator service.",
-    toolProperties="[]",
-)
-async def health_check(context) -> str:
-    """
-    Health check endpoint for MCP service
+# @app.generic_trigger(
+#     arg_name="context",
+#     type="mcpToolTrigger",
+#     toolName="health_check",
+#     description="Check the health status of the MCP Image Generator service.",
+#     toolProperties="[]",
+# )
+# async def health_check(context) -> str:
+#     """
+#     Health check endpoint for MCP service
     
-    Args:
-        context: The MCP tool invocation context
+#     Args:
+#         context: The MCP tool invocation context
         
-    Returns:
-        str: JSON string with service health status
-    """
-    logging.info('MCP Health Check tool called.')
+#     Returns:
+#         str: JSON string with service health status
+#     """
+#     logging.info('MCP Health Check tool called.')
     
-    response = {
-        "status": "healthy",
-        "service": "MCP Image Generator",
-        "version": "1.0.0"
-    }
+#     response = {
+#         "status": "healthy",
+#         "service": "MCP Image Generator",
+#         "version": "1.0.0"
+#     }
     
-    return json.dumps(response)
+#     return json.dumps(response)
 
