@@ -100,7 +100,8 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> str:
             endpoint=endpoint,
             api_key=api_key,
             deployment_name=deployment_name,
-            model=GptImageClient.ImageModel.FLUX
+            model=GptImageClient.ImageModel.FLUX,
+            output_format="png"
         )
         
         # Generate images asynchronously
