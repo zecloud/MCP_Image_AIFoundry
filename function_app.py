@@ -47,12 +47,17 @@ async def generate_image(context) -> str:
         arguments = content.get("arguments", {})
         
         logging.info(f"Request arguments: {json.dumps(arguments)}")
-        
+        try:
+            validated_input = ImageGenerationRequest(**arguments)
+        except Exception as e:
+            error_response = {"success": False, "error": f"Validation échouée: {str(e)}"}
+            logging.error(f"Erreur dans generate_image: {str(error_response)}")
+            return json.dumps(error_response)
         # Extract parameters from arguments
-        prompt = arguments.get('prompt')
-        size = arguments.get('size', '1024x1024')
-        quality = arguments.get('quality', 'standard')
-        n = arguments.get('n', 1)
+        prompt = validated_input.prompt
+        size = validated_input.size
+        quality = validated_input.quality
+        n = validated_input.n
         
         # Validate required parameters
         if not prompt:
