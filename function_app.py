@@ -1,3 +1,5 @@
+from typing import Optional
+
 import azure.functions as func
 import logging
 import json
@@ -6,7 +8,7 @@ from pydantic import BaseModel, Field
 from AzureFunctionsMCPPydanticTool import pydantic_to_tool_properties
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
-
+urlstorage=os.environ.get('AgentVideoStorage__blobServiceUri', '')
 
 # Pydantic model for image generation request
 class ImageGenerationRequest(BaseModel):
@@ -15,7 +17,9 @@ class ImageGenerationRequest(BaseModel):
     size: str = Field(default="1024x1024", description="The size of the generated image (e.g., '1024x1024')")
     quality: str = Field(default="standard", description="The quality of the generated image")
     n: int = Field(default=1, description="The number of images to generate")
-
+    video_id: Optional[str] = Field(default="", description="video ID for associating generated images with a video")
+    scene_number: Optional[int] = Field(default=None, description="Scene number for associating generated images with a specific scene in a video")
+    talk_number: Optional[int] = Field(default=None, description="Talk number for associating generated images with a specific talk in a video")
 
 # Convert Pydantic model to tool properties JSON
 tool_properties_json = pydantic_to_tool_properties(ImageGenerationRequest)
@@ -28,7 +32,12 @@ tool_properties_json = pydantic_to_tool_properties(ImageGenerationRequest)
     description="Generate images using Flux Pro 2 model via Azure AI Foundry. Provide a text prompt describing the image you want to create.",
     toolProperties=tool_properties_json,
 )
-async def generate_image(context) -> str:
+@app.blob_output(
+    arg_name="outputBlob",
+    path="fluxjob/agentvideo/{arguments.video_id}/img-{arguments.video_id}-scene{arguments.scene_number}-talk{arguments.talk_number}.png",
+    connection="AgentVideoStorage"
+)
+async def generate_image(context,outputBlob: func.Out[bytes]) -> str:
     """
     Azure Function with MCP trigger that generates images using Flux Pro 2
     via Azure AI Foundry.
@@ -58,7 +67,9 @@ async def generate_image(context) -> str:
         size = validated_input.size
         quality = validated_input.quality
         n = validated_input.n
-        
+        video_id = validated_input.video_id
+        scene_number = validated_input.scene_number
+        talk_number = validated_input.talk_number
         # Validate required parameters
         if not prompt:
             error_msg = "Missing required parameter: prompt"
@@ -88,25 +99,33 @@ async def generate_image(context) -> str:
         client = GptImageClient(
             endpoint=endpoint,
             api_key=api_key,
-            deployment_name=deployment_name
+            deployment_name=deployment_name,
+            model=GptImageClient.ImageModel.FLUX
         )
         
         # Generate images asynchronously
         logging.info(f"Generating {n} image(s) with prompt: {prompt}")
-        result = await client.generate_images_async(
+        result = await client.generate_image_async(
             prompt=prompt,
             size=size,
             quality=quality,
             n=n
         )
-        
+        if isinstance(result, str):
+            # Si c'est un chemin de fichier, lire le fichier
+            with open(result, "rb") as file:
+                image_bytes = file.read()
+        else:
+            # Sinon, c'est déjà des bytes
+            image_bytes = result
+        outputBlob.set(image_bytes)
+
         logging.info(f"Image generation completed successfully")
-        
+        blob_url = f"{urlstorage}/fluxjob/agentvideo/{video_id}/img-{video_id}-scene{scene_number}-talk{talk_number}.png"
         # Format response
         response = {
             "status": "success",
-            "images": result.get('data', []),
-            "created": result.get('created'),
+            "image": blob_url,
         }
         
         return json.dumps(response)
