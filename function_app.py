@@ -17,9 +17,10 @@ class ImageGenerationRequest(BaseModel):
     size: Optional[str] = Field(default="1024x1024", description="The size of the generated image (e.g., '1024x1024')")
     quality: Optional[str] = Field(default="standard", description="The quality of the generated image")
     n: Optional[int] = Field(default=1, description="The number of images to generate")
-    video_id: Optional[str] = Field(default="", description="video ID for associating generated images with a video")
-    scene_number: Optional[int] = Field(default=None, description="Scene number for associating generated images with a specific scene in a video")
-    talk_number: Optional[int] = Field(default=None, description="Talk number for associating generated images with a specific talk in a video")
+    video_id: Optional[str] = Field(default="test", description="video ID for associating generated images with a video")
+    scene_number: Optional[int] = Field(default=0, description="Scene number for associating generated images with a specific scene in a video")
+    talk_number: Optional[int] = Field(default=0, description="Talk number for associating generated images with a specific talk in a video")
+    prefix: Optional[str] = Field(default="img", description="Prefix for the generated image filenames")
 
 # Convert Pydantic model to tool properties JSON
 tool_properties_json = pydantic_to_tool_properties(ImageGenerationRequest)
@@ -34,7 +35,7 @@ tool_properties_json = pydantic_to_tool_properties(ImageGenerationRequest)
 )
 @app.blob_output(
     arg_name="outputBlob",
-    path="fluxjob/agentvideo/{arguments.video_id}/img-{arguments.video_id}-scene{arguments.scene_number}-talk{arguments.talk_number}.png",
+    path="fluxjob/agentvideo/{arguments.video_id}/{arguments.prefix}-{arguments.video_id}-scene{arguments.scene_number}-talk{arguments.talk_number}.png",
     connection="AgentVideoStorage"
 )
 async def generate_image(context,outputBlob: func.Out[bytes]) -> str:
