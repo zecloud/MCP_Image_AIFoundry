@@ -217,7 +217,7 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         prefix = validated_input.prefix
         
         # Validate required parameters
-        if not prompt or not filenames or len(filenames) == 0:
+        if not prompt or not filenames:
             error_msg = "Missing required parameters: prompt and filenames list"
             logging.error(error_msg)
             return json.dumps({"error": error_msg})
