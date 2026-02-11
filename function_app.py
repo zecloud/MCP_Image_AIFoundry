@@ -1,6 +1,7 @@
 from typing import Optional
 
 import azure.functions as func
+import azurefunctions.extensions.bindings.blob as blob
 import logging
 import json
 import os
@@ -28,7 +29,7 @@ tool_properties_json = pydantic_to_tool_properties(ImageGenerationRequest)
 # Pydantic model for image editing request
 class ImageEditRequest(BaseModel):
     """Request model for image editing using Flux Pro 2"""
-    filename: str = Field(..., description="The filename of the image to edit (e.g., 'img-test-scene0-talk0.png')")
+    filenames: list[str] = Field(..., description="List of filenames of reference images to use for editing (e.g., ['img-test-scene0-talk0.png', 'img-test-scene1-talk0.png'])")
     prompt: str = Field(..., description="The text description of how to edit the image")
     size: Optional[str] = Field(default="1024x1024", description="The size of the edited image (e.g., '1024x1024')")
     quality: Optional[str] = Field(default="standard", description="The quality of the edited image")
@@ -163,12 +164,12 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> str:
     arg_name="context",
     type="mcpToolTrigger",
     toolName="edit_image",
-    description="Edit images using Flux Pro 2 model via Azure AI Foundry. Provide a filename and a text prompt describing the edits you want to make.",
+    description="Edit images using Flux Pro 2 model via Azure AI Foundry. Provide a list of filenames and a text prompt describing the edits you want to make.",
     toolProperties=edit_tool_properties_json,
 )
 @app.blob_input(
-    arg_name="inputBlob",
-    path="fluxjob/agentvideo/{arguments.filename}",
+    arg_name="containerClient",
+    path="fluxjob/agentvideo",
     connection="AgentVideoStorage"
 )
 @app.blob_output(
@@ -176,14 +177,14 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> str:
     path="fluxjob/agentvideo/{arguments.video_id}/{arguments.prefix}-{arguments.video_id}-scene{arguments.scene_number}-talk{arguments.talk_number}.png",
     connection="AgentVideoStorage"
 )
-async def edit_image(context, inputBlob: bytes, outputBlob: func.Out[bytes]) -> str:
+async def edit_image(context, containerClient: blob.ContainerClient, outputBlob: func.Out[bytes]) -> str:
     """
     Azure Function with MCP trigger that edits images using Flux Pro 2
-    via Azure AI Foundry.
+    via Azure AI Foundry with multiple reference images.
     
     Args:
         context: The MCP tool invocation context containing the request arguments
-        inputBlob: The input image bytes to edit
+        containerClient: ContainerClient to access multiple blobs in the container
         outputBlob: The output blob for the edited image
         
     Returns:
@@ -205,7 +206,7 @@ async def edit_image(context, inputBlob: bytes, outputBlob: func.Out[bytes]) -> 
             return json.dumps(error_response)
             
         # Extract parameters from arguments
-        filename = validated_input.filename
+        filenames = validated_input.filenames
         prompt = validated_input.prompt
         size = validated_input.size
         quality = validated_input.quality
@@ -216,16 +217,28 @@ async def edit_image(context, inputBlob: bytes, outputBlob: func.Out[bytes]) -> 
         prefix = validated_input.prefix
         
         # Validate required parameters
-        if not prompt or not filename:
-            error_msg = "Missing required parameters: prompt and filename"
+        if not prompt or not filenames or len(filenames) == 0:
+            error_msg = "Missing required parameters: prompt and filenames list"
             logging.error(error_msg)
             return json.dumps({"error": error_msg})
         
-        # Check if input blob exists
-        if not inputBlob:
-            error_msg = f"Input image not found: {filename}"
-            logging.error(error_msg)
-            return json.dumps({"error": error_msg})
+        # Download all reference images using ContainerClient
+        reference_images = []
+        for filename in filenames:
+            try:
+                # Get blob client for each file from the container
+                blob_client = containerClient.get_blob_client(filename)
+                
+                # Download the blob content
+                download_stream = blob_client.download_blob()
+                image_data = download_stream.readall()
+                
+                reference_images.append(image_data)
+                logging.info(f"Downloaded reference image: {filename}")
+            except Exception as e:
+                error_msg = f"Failed to download image {filename}: {str(e)}"
+                logging.error(error_msg)
+                return json.dumps({"error": error_msg})
         
         # Get Azure OpenAI credentials from environment variables
         endpoint = os.environ.get('AZURE_OPENAI_ENDPOINT')
@@ -255,10 +268,10 @@ async def edit_image(context, inputBlob: bytes, outputBlob: func.Out[bytes]) -> 
             output_format="png"
         )
         
-        # Edit image asynchronously
-        logging.info(f"Editing image {filename} with prompt: {prompt}")
+        # Edit image asynchronously with multiple reference images
+        logging.info(f"Editing with {len(reference_images)} reference images and prompt: {prompt}")
         result = await client.edit_image_async(
-            image=inputBlob,
+            image=reference_images,  # Pass list of images
             prompt=prompt,
             size=size,
             quality=quality,
@@ -282,6 +295,7 @@ async def edit_image(context, inputBlob: bytes, outputBlob: func.Out[bytes]) -> 
         response = {
             "status": "success",
             "image": blob_url,
+            "reference_images_used": len(reference_images)
         }
         
         return json.dumps(response)

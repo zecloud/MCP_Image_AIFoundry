@@ -1,4 +1,5 @@
 azure-functions
+azurefunctions-extensions-bindings-blob
 git+https://github.com/zecloud/azureopenaigptimageclient.git#subdirectory=Image
 git+https://github.com/zecloud/azurefunctionsmcpydantic.git
 pydantic
