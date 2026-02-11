@@ -25,6 +25,22 @@ class ImageGenerationRequest(BaseModel):
 # Convert Pydantic model to tool properties JSON
 tool_properties_json = pydantic_to_tool_properties(ImageGenerationRequest)
 
+# Pydantic model for image editing request
+class ImageEditRequest(BaseModel):
+    """Request model for image editing using Flux Pro 2"""
+    filename: str = Field(..., description="The filename of the image to edit (e.g., 'img-test-scene0-talk0.png')")
+    prompt: str = Field(..., description="The text description of how to edit the image")
+    size: Optional[str] = Field(default="1024x1024", description="The size of the edited image (e.g., '1024x1024')")
+    quality: Optional[str] = Field(default="standard", description="The quality of the edited image")
+    n: Optional[int] = Field(default=1, description="The number of images to generate")
+    video_id: Optional[str] = Field(default="test", description="video ID for associating edited images with a video")
+    scene_number: Optional[int] = Field(default=0, description="Scene number for associating edited images with a specific scene in a video")
+    talk_number: Optional[int] = Field(default=0, description="Talk number for associating edited images with a specific talk in a video")
+    prefix: Optional[str] = Field(default="edited", description="Prefix for the edited image filenames")
+
+# Convert Pydantic model for image editing to tool properties JSON
+edit_tool_properties_json = pydantic_to_tool_properties(ImageEditRequest)
+
 
 @app.generic_trigger(
     arg_name="context",
@@ -71,6 +87,7 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> str:
         video_id = validated_input.video_id
         scene_number = validated_input.scene_number
         talk_number = validated_input.talk_number
+        prefix = validated_input.prefix
         # Validate required parameters
         if not prompt:
             error_msg = "Missing required parameter: prompt"
@@ -123,7 +140,7 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> str:
         outputBlob.set(image_bytes)
 
         logging.info(f"Image generation completed successfully")
-        blob_url = f"{urlstorage}/fluxjob/agentvideo/{video_id}/img-{video_id}-scene{scene_number}-talk{talk_number}.png"
+        blob_url = f"{urlstorage}/fluxjob/agentvideo/{video_id}/{prefix}-{video_id}-scene{scene_number}-talk{talk_number}.png"
         # Format response
         response = {
             "status": "success",
@@ -140,6 +157,145 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> str:
         error_msg = f"Error generating image: {str(e)}"
         logging.error(error_msg, exc_info=True)
         return json.dumps({"error": error_msg})
+
+
+@app.generic_trigger(
+    arg_name="context",
+    type="mcpToolTrigger",
+    toolName="edit_image",
+    description="Edit images using Flux Pro 2 model via Azure AI Foundry. Provide a filename and a text prompt describing the edits you want to make.",
+    toolProperties=edit_tool_properties_json,
+)
+@app.blob_input(
+    arg_name="inputBlob",
+    path="fluxjob/agentvideo/{arguments.filename}",
+    connection="AgentVideoStorage"
+)
+@app.blob_output(
+    arg_name="outputBlob",
+    path="fluxjob/agentvideo/{arguments.video_id}/{arguments.prefix}-{arguments.video_id}-scene{arguments.scene_number}-talk{arguments.talk_number}.png",
+    connection="AgentVideoStorage"
+)
+async def edit_image(context, inputBlob: bytes, outputBlob: func.Out[bytes]) -> str:
+    """
+    Azure Function with MCP trigger that edits images using Flux Pro 2
+    via Azure AI Foundry.
+    
+    Args:
+        context: The MCP tool invocation context containing the request arguments
+        inputBlob: The input image bytes to edit
+        outputBlob: The output blob for the edited image
+        
+    Returns:
+        str: JSON string with the edited image URL and metadata
+    """
+    logging.info('MCP Image Editor function received a request.')
+    
+    try:
+        # Parse the context to extract arguments
+        content = json.loads(context)
+        arguments = content.get("arguments", {})
+        
+        logging.info(f"Request arguments: {json.dumps(arguments)}")
+        try:
+            validated_input = ImageEditRequest(**arguments)
+        except Exception as e:
+            error_response = {"success": False, "error": f"Validation échouée: {str(e)}"}
+            logging.error(f"Erreur dans edit_image: {str(error_response)}")
+            return json.dumps(error_response)
+            
+        # Extract parameters from arguments
+        filename = validated_input.filename
+        prompt = validated_input.prompt
+        size = validated_input.size
+        quality = validated_input.quality
+        n = validated_input.n
+        video_id = validated_input.video_id
+        scene_number = validated_input.scene_number
+        talk_number = validated_input.talk_number
+        prefix = validated_input.prefix
+        
+        # Validate required parameters
+        if not prompt or not filename:
+            error_msg = "Missing required parameters: prompt and filename"
+            logging.error(error_msg)
+            return json.dumps({"error": error_msg})
+        
+        # Check if input blob exists
+        if not inputBlob:
+            error_msg = f"Input image not found: {filename}"
+            logging.error(error_msg)
+            return json.dumps({"error": error_msg})
+        
+        # Get Azure OpenAI credentials from environment variables
+        endpoint = os.environ.get('AZURE_OPENAI_ENDPOINT')
+        api_key = os.environ.get('AZURE_OPENAI_API_KEY')
+        deployment_name = os.environ.get('AZURE_OPENAI_DEPLOYMENT_NAME', 'flux-pro-2')
+        
+        if not endpoint or not api_key:
+            error_msg = "Azure OpenAI credentials not configured"
+            logging.error(error_msg)
+            return json.dumps({"error": error_msg})
+        
+        # Import the image generation client
+        try:
+            from FoundryImageClient import GptImageClient
+        except ImportError as e:
+            error_msg = f"Image client library not available: {str(e)}"
+            logging.error(error_msg)
+            return json.dumps({"error": error_msg})
+        
+        # Initialize the image client
+        logging.info(f"Initializing Azure OpenAI Image Client for editing with deployment: {deployment_name}")
+        client = GptImageClient(
+            endpoint=endpoint,
+            api_key=api_key,
+            deployment_name=deployment_name,
+            model=GptImageClient.ImageModel.FLUX,
+            output_format="png"
+        )
+        
+        # Edit image asynchronously
+        logging.info(f"Editing image {filename} with prompt: {prompt}")
+        result = await client.edit_image_async(
+            image=inputBlob,
+            prompt=prompt,
+            size=size,
+            quality=quality,
+            n=n
+        )
+        
+        if isinstance(result, str):
+            # Si c'est un chemin de fichier, lire le fichier
+            with open(result, "rb") as file:
+                image_bytes = file.read()
+        else:
+            # Sinon, c'est déjà des bytes
+            image_bytes = result
+            
+        outputBlob.set(image_bytes)
+
+        logging.info(f"Image editing completed successfully")
+        blob_url = f"{urlstorage}/fluxjob/agentvideo/{video_id}/{prefix}-{video_id}-scene{scene_number}-talk{talk_number}.png"
+        
+        # Format response
+        response = {
+            "status": "success",
+            "image": blob_url,
+        }
+        
+        return json.dumps(response)
+        
+    except ValueError as e:
+        error_msg = f"Invalid request: {str(e)}"
+        logging.error(error_msg)
+        return json.dumps({"error": error_msg})
+    except Exception as e:
+        error_msg = f"Error editing image: {str(e)}"
+        logging.error(error_msg, exc_info=True)
+        return json.dumps({"error": error_msg})
+
+
 
 
 # @app.generic_trigger(
