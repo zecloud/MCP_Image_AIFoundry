@@ -169,7 +169,7 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> str:
 )
 @app.blob_input(
     arg_name="containerClient",
-    path="fluxjob/agentvideo/{arguments.video_id}",
+    path="fluxjob",
     connection="AgentVideoStorage"
 )
 @app.blob_output(
@@ -227,7 +227,7 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         for filename in filenames:
             try:
                 # Get blob client for each file from the container
-                blob_client = containerClient.get_blob_client(filename)
+                blob_client = containerClient.get_blob_client(f"agentvideo/{video_id}/{filename}")
                 
                 # Download the blob content
                 download_stream = blob_client.download_blob()
