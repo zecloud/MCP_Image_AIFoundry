@@ -169,7 +169,7 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> str:
 )
 @app.blob_input(
     arg_name="containerClient",
-    path="fluxjob/agentvideo",
+    path="fluxjob/agentvideo/{arguments.video_id}",
     connection="AgentVideoStorage"
 )
 @app.blob_output(
