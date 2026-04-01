@@ -272,7 +272,8 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         logging.info(f"Editing with {len(reference_images)} reference images and prompt: {prompt}")
         result = await client.flux2edit_image_async(
             images=reference_images,  # Pass list of images
-            prompt=prompt
+            prompt=prompt,
+            size=size
         )
         
         if isinstance(result, str):
