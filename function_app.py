@@ -47,6 +47,14 @@ class ImageEditRequest(BaseModel):
         has_base64 = self.images_base64 and len(self.images_base64) > 0
         if not has_filenames and not has_base64:
             raise ValueError("At least one of 'filenames' or 'images_base64' must be provided with at least one item")
+        if has_filenames:
+            for i, name in enumerate(self.filenames):
+                if not name or not name.strip():
+                    raise ValueError(f"filenames[{i}] must be a non-empty string")
+        if has_base64:
+            for i, b64 in enumerate(self.images_base64):
+                if not b64 or not b64.strip():
+                    raise ValueError(f"images_base64[{i}] must be a non-empty string")
         return self
 
 # Convert Pydantic model for image editing to tool properties JSON
@@ -207,7 +215,8 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         content = json.loads(context)
         arguments = content.get("arguments", {})
         
-        logging.info(f"Request arguments: {json.dumps(arguments)}")
+        safe_args = {k: (f"[{len(v)} base64 image(s) redacted]" if k == "images_base64" and isinstance(v, list) else v) for k, v in arguments.items()}
+        logging.info(f"Request arguments: {json.dumps(safe_args)}")
         try:
             validated_input = ImageEditRequest(**arguments)
         except Exception as e:
@@ -252,7 +261,14 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         # Decode base64-encoded reference images
         for idx, b64_image in enumerate(images_base64):
             try:
-                image_data = base64.b64decode(b64_image)
+                normalized_b64_image = b64_image
+                if isinstance(normalized_b64_image, str) and normalized_b64_image.startswith("data:"):
+                    header, separator, encoded_data = normalized_b64_image.partition(",")
+                    if not separator or ";base64" not in header:
+                        raise ValueError("Invalid data URL for base64 image")
+                    normalized_b64_image = encoded_data
+
+                image_data = base64.b64decode(normalized_b64_image, validate=True)
                 reference_images.append(image_data)
                 logging.info(f"Decoded base64 reference image {idx}")
             except Exception as e:
