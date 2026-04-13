@@ -156,20 +156,87 @@ def test_edit_image_multiple_references():
         print(f"\n✗ Unexpected error: {str(e)}")
 
 
-def test_edit_image_validation():
-    """Test the image editing MCP tool with invalid inputs"""
+def test_edit_image_base64():
+    """Test the image editing MCP tool with base64-encoded images"""
     
-    # Test with empty filenames list
+    import base64
+    
+    # Create a minimal 1x1 red PNG for testing
+    # In real usage, this would be a full image encoded as base64
+    minimal_png = (
+        b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01'
+        b'\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00'
+        b'\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00'
+        b'\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82'
+    )
+    b64_image = base64.b64encode(minimal_png).decode("utf-8")
+    
     request_data = {
         "name": "edit_image",
         "arguments": {
-            "filenames": [],
+            "images_base64": [b64_image],
+            "prompt": "Transform this into a watercolor painting",
+            "size": "1024x1024",
+            "quality": "standard",
+            "n": 1,
+            "video_id": "test",
+            "scene_number": 0,
+            "talk_number": 0,
+            "prefix": "edited-b64"
+        }
+    }
+    
+    print("\nTesting MCP Image Editor Tool with Base64 Image...")
+    print(f"Request: {json.dumps({**request_data, 'arguments': {**request_data['arguments'], 'images_base64': ['<base64 data truncated>']}}, indent=2)}")
+    
+    try:
+        headers = {"Content-Type": "application/json"}
+        response = requests.post(
+            FUNCTION_BASE_URL,
+            json=request_data,
+            headers=headers,
+            timeout=120
+        )
+        
+        print(f"\nStatus Code: {response.status_code}")
+        
+        try:
+            response_json = response.json()
+            print(f"Response: {json.dumps(response_json, indent=2)}")
+            
+            if response.status_code == 200:
+                print("\n✓ Test passed! Image edited successfully with base64 input.")
+                if isinstance(response_json, str):
+                    result = json.loads(response_json)
+                else:
+                    result = response_json
+                if result.get("image"):
+                    print(f"\nEdited Image URL: {result.get('image')}")
+                    print(f"Reference Images Used: {result.get('reference_images_used', 'N/A')}")
+            else:
+                print("\n✗ Test failed!")
+        except json.JSONDecodeError:
+            print(f"Response Text: {response.text}")
+    except requests.exceptions.RequestException as e:
+        print(f"\n✗ Error making request: {str(e)}")
+        print("\nNote: Make sure the Azure Function is running locally with 'func start'")
+    except Exception as e:
+        print(f"\n✗ Unexpected error: {str(e)}")
+
+
+def test_edit_image_validation():
+    """Test the image editing MCP tool with invalid inputs"""
+    
+    # Test with no image source at all
+    request_data = {
+        "name": "edit_image",
+        "arguments": {
             "prompt": "This should fail validation",
             "video_id": "test"
         }
     }
     
-    print("\nTesting MCP Image Editor Tool with Invalid Input (empty filenames list)...")
+    print("\nTesting MCP Image Editor Tool with Invalid Input (no image sources)...")
     print(f"Request: {json.dumps(request_data, indent=2)}")
     
     try:
@@ -197,9 +264,9 @@ def test_edit_image_validation():
                 result = response_json
                 
             if result.get("error"):
-                print("\n✓ Validation test passed! Empty filenames list properly rejected.")
+                print("\n✓ Validation test passed! Missing image sources properly rejected.")
             else:
-                print("\n✗ Validation test failed! Should have rejected empty filenames list.")
+                print("\n✗ Validation test failed! Should have rejected missing image sources.")
         except json.JSONDecodeError:
             print(f"Response Text: {response.text}")
             
@@ -224,6 +291,10 @@ if __name__ == "__main__":
     # Test multiple reference images
     print("\n" + "=" * 80)
     test_edit_image_multiple_references()
+    
+    # Test base64 images
+    print("\n" + "=" * 80)
+    test_edit_image_base64()
     
     # Test validation
     print("\n" + "=" * 80)

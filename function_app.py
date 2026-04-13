@@ -5,7 +5,8 @@ import azurefunctions.extensions.bindings.blob as blob
 import logging
 import json
 import os
-from pydantic import BaseModel, Field
+import base64
+from pydantic import BaseModel, Field, model_validator
 from AzureFunctionsMCPPydanticTool import pydantic_to_tool_properties
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
@@ -29,7 +30,8 @@ tool_properties_json = pydantic_to_tool_properties(ImageGenerationRequest)
 # Pydantic model for image editing request
 class ImageEditRequest(BaseModel):
     """Request model for image editing using Flux Pro 2"""
-    filenames: list[str] = Field(..., description="List of filenames of reference images to use for editing (e.g., ['img-test-scene0-talk0.png', 'img-test-scene1-talk0.png'])")
+    filenames: Optional[list[str]] = Field(default=None, description="List of filenames of reference images stored in blob storage (e.g., ['img-test-scene0-talk0.png']). At least one of filenames or images_base64 must be provided.")
+    images_base64: Optional[list[str]] = Field(default=None, description="List of base64-encoded images to use as reference for editing. At least one of filenames or images_base64 must be provided.")
     prompt: str = Field(..., description="The text description of how to edit the image")
     size: Optional[str] = Field(default="1024x1024", description="The size of the edited image (e.g., '1024x1024')")
     quality: Optional[str] = Field(default="standard", description="The quality of the edited image")
@@ -38,6 +40,14 @@ class ImageEditRequest(BaseModel):
     scene_number: Optional[int] = Field(default=0, description="Scene number for associating edited images with a specific scene in a video")
     talk_number: Optional[int] = Field(default=0, description="Talk number for associating edited images with a specific talk in a video")
     prefix: Optional[str] = Field(default="edited", description="Prefix for the edited image filenames")
+
+    @model_validator(mode='after')
+    def check_at_least_one_image_source(self):
+        has_filenames = self.filenames and len(self.filenames) > 0
+        has_base64 = self.images_base64 and len(self.images_base64) > 0
+        if not has_filenames and not has_base64:
+            raise ValueError("At least one of 'filenames' or 'images_base64' must be provided with at least one item")
+        return self
 
 # Convert Pydantic model for image editing to tool properties JSON
 edit_tool_properties_json = pydantic_to_tool_properties(ImageEditRequest)
@@ -164,7 +174,7 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> str:
     arg_name="context",
     type="mcpToolTrigger",
     toolName="edit_image",
-    description="Edit images using Flux Pro 2 model via Azure AI Foundry. Provide a list of filenames and a text prompt describing the edits you want to make.",
+    description="Edit images using Flux Pro 2 model via Azure AI Foundry. Provide reference images as blob filenames and/or base64-encoded strings, along with a text prompt describing the edits.",
     toolProperties=edit_tool_properties_json,
 )
 @app.blob_input(
@@ -206,7 +216,8 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
             return json.dumps(error_response)
             
         # Extract parameters from arguments
-        filenames = validated_input.filenames
+        filenames = validated_input.filenames or []
+        images_base64 = validated_input.images_base64 or []
         prompt = validated_input.prompt
         size = validated_input.size
         quality = validated_input.quality
@@ -217,26 +228,35 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         prefix = validated_input.prefix
         
         # Validate required parameters
-        if not prompt or not filenames:
-            error_msg = "Missing required parameters: prompt and filenames list"
+        if not prompt:
+            error_msg = "Missing required parameter: prompt"
             logging.error(error_msg)
             return json.dumps({"error": error_msg})
         
-        # Download all reference images using ContainerClient
+        # Collect reference images from both sources
         reference_images = []
+
+        # Download blob-stored reference images
         for filename in filenames:
             try:
-                # Get blob client for each file from the container
                 blob_client = containerClient.get_blob_client(f"agentvideo/{video_id}/{filename}")
-                
-                # Download the blob content
                 download_stream = blob_client.download_blob()
                 image_data = download_stream.readall()
-                
                 reference_images.append(image_data)
                 logging.info(f"Downloaded reference image: {filename}")
             except Exception as e:
                 error_msg = f"Failed to download image {filename}: {str(e)}"
+                logging.error(error_msg)
+                return json.dumps({"error": error_msg})
+
+        # Decode base64-encoded reference images
+        for idx, b64_image in enumerate(images_base64):
+            try:
+                image_data = base64.b64decode(b64_image)
+                reference_images.append(image_data)
+                logging.info(f"Decoded base64 reference image {idx}")
+            except Exception as e:
+                error_msg = f"Failed to decode base64 image at index {idx}: {str(e)}"
                 logging.error(error_msg)
                 return json.dumps({"error": error_msg})
         
