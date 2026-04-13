@@ -27,7 +27,7 @@ def test_edit_image_single_reference():
     request_data = {
         "name": "edit_image",
         "arguments": {
-            "filenames": ["img-test-scene0-talk0.png"],
+            "images": ["img-test-scene0-talk0.png"],
             "prompt": "Add dramatic sunset colors and enhance the lighting",
             "size": "1024x1024",
             "quality": "standard",
@@ -93,7 +93,7 @@ def test_edit_image_multiple_references():
     request_data = {
         "name": "edit_image",
         "arguments": {
-            "filenames": [
+            "images": [
                 "img-test-scene0-talk0.png",
                 "img-test-scene1-talk0.png",
                 "img-test-scene2-talk0.png"
@@ -174,7 +174,7 @@ def test_edit_image_base64():
     request_data = {
         "name": "edit_image",
         "arguments": {
-            "images_base64": [b64_image],
+            "images": [b64_image],
             "prompt": "Transform this into a watercolor painting",
             "size": "1024x1024",
             "quality": "standard",
@@ -187,7 +187,7 @@ def test_edit_image_base64():
     }
     
     print("\nTesting MCP Image Editor Tool with Base64 Image...")
-    print(f"Request: {json.dumps({**request_data, 'arguments': {**request_data['arguments'], 'images_base64': ['<base64 data truncated>']}}, indent=2)}")
+    print(f"Request: {json.dumps({**request_data, 'arguments': {**request_data['arguments'], 'images': ['<base64 data truncated>']}}, indent=2)}")
     
     try:
         headers = {"Content-Type": "application/json"}
@@ -224,19 +224,87 @@ def test_edit_image_base64():
         print(f"\n✗ Unexpected error: {str(e)}")
 
 
-def test_edit_image_validation():
-    """Test the image editing MCP tool with invalid inputs"""
+def test_edit_image_mixed():
+    """Test the image editing MCP tool with a mix of filenames and base64 images"""
     
-    # Test with no image source at all
+    import base64
+    
+    minimal_png = (
+        b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01'
+        b'\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00'
+        b'\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00'
+        b'\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82'
+    )
+    b64_image = base64.b64encode(minimal_png).decode("utf-8")
+    
     request_data = {
         "name": "edit_image",
         "arguments": {
+            "images": [
+                "img-test-scene0-talk0.png",
+                b64_image
+            ],
+            "prompt": "Blend these images with a cohesive style",
+            "size": "1024x1024",
+            "video_id": "test",
+            "scene_number": 0,
+            "talk_number": 2,
+            "prefix": "mixed"
+        }
+    }
+    
+    print("\nTesting MCP Image Editor Tool with Mixed Filenames + Base64...")
+    print(f"Request: {json.dumps({**request_data, 'arguments': {**request_data['arguments'], 'images': ['img-test-scene0-talk0.png', '<base64 data truncated>']}}, indent=2)}")
+    
+    try:
+        headers = {"Content-Type": "application/json"}
+        response = requests.post(
+            FUNCTION_BASE_URL,
+            json=request_data,
+            headers=headers,
+            timeout=120
+        )
+        
+        print(f"\nStatus Code: {response.status_code}")
+        
+        try:
+            response_json = response.json()
+            print(f"Response: {json.dumps(response_json, indent=2)}")
+            
+            if response.status_code == 200:
+                print("\n✓ Test passed! Image edited successfully with mixed inputs.")
+                if isinstance(response_json, str):
+                    result = json.loads(response_json)
+                else:
+                    result = response_json
+                if result.get("image"):
+                    print(f"\nEdited Image URL: {result.get('image')}")
+                    print(f"Reference Images Used: {result.get('reference_images_used', 'N/A')}")
+            else:
+                print("\n✗ Test failed!")
+        except json.JSONDecodeError:
+            print(f"Response Text: {response.text}")
+    except requests.exceptions.RequestException as e:
+        print(f"\n✗ Error making request: {str(e)}")
+        print("\nNote: Make sure the Azure Function is running locally with 'func start'")
+    except Exception as e:
+        print(f"\n✗ Unexpected error: {str(e)}")
+
+
+def test_edit_image_validation():
+    """Test the image editing MCP tool with invalid inputs"""
+    
+    # Test with empty images list
+    request_data = {
+        "name": "edit_image",
+        "arguments": {
+            "images": [],
             "prompt": "This should fail validation",
             "video_id": "test"
         }
     }
     
-    print("\nTesting MCP Image Editor Tool with Invalid Input (no image sources)...")
+    print("\nTesting MCP Image Editor Tool with Invalid Input (empty images list)...")
     print(f"Request: {json.dumps(request_data, indent=2)}")
     
     try:
@@ -264,9 +332,9 @@ def test_edit_image_validation():
                 result = response_json
                 
             if result.get("error"):
-                print("\n✓ Validation test passed! Missing image sources properly rejected.")
+                print("\n✓ Validation test passed! Empty images list properly rejected.")
             else:
-                print("\n✗ Validation test failed! Should have rejected missing image sources.")
+                print("\n✗ Validation test failed! Should have rejected empty images list.")
         except json.JSONDecodeError:
             print(f"Response Text: {response.text}")
             
@@ -295,6 +363,10 @@ if __name__ == "__main__":
     # Test base64 images
     print("\n" + "=" * 80)
     test_edit_image_base64()
+    
+    # Test mixed filenames + base64
+    print("\n" + "=" * 80)
+    test_edit_image_mixed()
     
     # Test validation
     print("\n" + "=" * 80)
