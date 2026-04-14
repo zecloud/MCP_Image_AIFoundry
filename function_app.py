@@ -1,17 +1,12 @@
 from typing import Optional
-import re
 
 import azure.functions as func
 import azurefunctions.extensions.bindings.blob as blob
 import logging
 import json
 import os
-import base64
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 from AzureFunctionsMCPPydanticTool import pydantic_to_tool_properties
-
-# Regex to detect a blob filename (short string ending with an image extension)
-_FILENAME_PATTERN = re.compile(r'^[\w\-./\\]+\.\w{2,5}$')
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 urlstorage=os.environ.get('AgentVideoStorage__blobServiceUri', '')
@@ -34,7 +29,7 @@ tool_properties_json = pydantic_to_tool_properties(ImageGenerationRequest)
 # Pydantic model for image editing request
 class ImageEditRequest(BaseModel):
     """Request model for image editing using Flux Pro 2"""
-    images: list[str] = Field(..., description="List of reference images for editing. Each entry can be a blob storage filename (e.g., 'img-test-scene0-talk0.png') or a base64-encoded image string (optionally prefixed with a data URL like 'data:image/png;base64,...'). The type is auto-detected.", min_length=1)
+    filenames: list[str] = Field(..., description="List of filenames of reference images to use for editing (e.g., ['img-test-scene0-talk0.png', 'img-test-scene1-talk0.png'])")
     prompt: str = Field(..., description="The text description of how to edit the image")
     size: Optional[str] = Field(default="1024x1024", description="The size of the edited image (e.g., '1024x1024')")
     quality: Optional[str] = Field(default="standard", description="The quality of the edited image")
@@ -43,30 +38,6 @@ class ImageEditRequest(BaseModel):
     scene_number: Optional[int] = Field(default=0, description="Scene number for associating edited images with a specific scene in a video")
     talk_number: Optional[int] = Field(default=0, description="Talk number for associating edited images with a specific talk in a video")
     prefix: Optional[str] = Field(default="edited", description="Prefix for the edited image filenames")
-
-    @field_validator('images')
-    @classmethod
-    def validate_images(cls, v):
-        for i, item in enumerate(v):
-            if not item or not item.strip():
-                raise ValueError(f"images[{i}] must be a non-empty string")
-        return v
-
-
-def _is_filename(value: str) -> bool:
-    """Detect whether a string looks like a blob storage filename."""
-    return bool(_FILENAME_PATTERN.match(value.strip()))
-
-
-def _decode_base64_image(b64_image: str) -> bytes:
-    """Decode a base64 string, stripping data URL prefix if present."""
-    normalized = b64_image
-    if normalized.startswith("data:"):
-        header, separator, encoded_data = normalized.partition(",")
-        if not separator or ";base64" not in header:
-            raise ValueError("Invalid data URL for base64 image")
-        normalized = encoded_data
-    return base64.b64decode(normalized, validate=True)
 
 # Convert Pydantic model for image editing to tool properties JSON
 edit_tool_properties_json = pydantic_to_tool_properties(ImageEditRequest)
@@ -193,7 +164,7 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> str:
     arg_name="context",
     type="mcpToolTrigger",
     toolName="edit_image",
-    description="Edit images using Flux Pro 2 model via Azure AI Foundry. Provide reference images as blob filenames or base64-encoded strings (auto-detected), along with a text prompt describing the edits.",
+    description="Edit images using Flux Pro 2 model via Azure AI Foundry. Provide a list of filenames and a text prompt describing the edits you want to make.",
     toolProperties=edit_tool_properties_json,
 )
 @app.blob_input(
@@ -226,8 +197,7 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         content = json.loads(context)
         arguments = content.get("arguments", {})
         
-        safe_args = {k: (f"[{len(v)} image(s), base64 data redacted]" if k == "images" and isinstance(v, list) else v) for k, v in arguments.items()}
-        logging.info(f"Request arguments: {json.dumps(safe_args)}")
+        logging.info(f"Request arguments: {json.dumps(arguments)}")
         try:
             validated_input = ImageEditRequest(**arguments)
         except Exception as e:
@@ -236,7 +206,7 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
             return json.dumps(error_response)
             
         # Extract parameters from arguments
-        images_input = validated_input.images
+        filenames = validated_input.filenames
         prompt = validated_input.prompt
         size = validated_input.size
         quality = validated_input.quality
@@ -247,37 +217,33 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         prefix = validated_input.prefix
         
         # Validate required parameters
+        missing_params = []
         if not prompt:
-            error_msg = "Missing required parameter: prompt"
+            missing_params.append("prompt")
+        if not filenames:
+            missing_params.append("filenames list")
+        if missing_params:
+            error_msg = f"Missing required parameter(s): {', '.join(missing_params)}"
             logging.error(error_msg)
             return json.dumps({"error": error_msg})
         
-        # Collect reference images, auto-detecting filenames vs base64
+        # Download all reference images using ContainerClient
         reference_images = []
-
-        for idx, image_entry in enumerate(images_input):
-            if _is_filename(image_entry):
-                # Treat as a blob storage filename
-                try:
-                    blob_client = containerClient.get_blob_client(f"agentvideo/{video_id}/{image_entry}")
-                    download_stream = blob_client.download_blob()
-                    image_data = download_stream.readall()
-                    reference_images.append(image_data)
-                    logging.info(f"Downloaded reference image: {image_entry}")
-                except Exception as e:
-                    error_msg = f"Failed to download image {image_entry}: {str(e)}"
-                    logging.error(error_msg)
-                    return json.dumps({"error": error_msg})
-            else:
-                # Treat as base64-encoded image data
-                try:
-                    image_data = _decode_base64_image(image_entry)
-                    reference_images.append(image_data)
-                    logging.info(f"Decoded base64 reference image {idx}")
-                except Exception as e:
-                    error_msg = f"Failed to decode base64 image at index {idx}: {str(e)}"
-                    logging.error(error_msg)
-                    return json.dumps({"error": error_msg})
+        for filename in filenames:
+            try:
+                # Get blob client for each file from the container
+                blob_client = containerClient.get_blob_client(f"agentvideo/{video_id}/{filename}")
+                
+                # Download the blob content
+                download_stream = blob_client.download_blob()
+                image_data = download_stream.readall()
+                
+                reference_images.append(image_data)
+                logging.info(f"Downloaded reference image: {filename}")
+            except Exception as e:
+                error_msg = f"Failed to download image {filename}: {str(e)}"
+                logging.error(error_msg)
+                return json.dumps({"error": error_msg})
         
         # Get Azure OpenAI credentials from environment variables
         endpoint = os.environ.get('AZURE_OPENAI_ENDPOINT')
