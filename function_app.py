@@ -1,4 +1,5 @@
 from typing import Optional
+import tempfile
 
 import azure.functions as func
 import azurefunctions.extensions.bindings.blob as blob
@@ -281,11 +282,31 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         # Edit image asynchronously with multiple reference images
         logging.info(f"Editing with {len(reference_images)} reference images and prompt: {prompt}")
         if use_flux_kontext:
-            result = await client.edit_image_async(
-                images=reference_images,
-                prompt=prompt,
-                size=size
-            )
+            # edit_image_async expects file paths, so write bytes to files in a temp directory
+            temp_dir = tempfile.TemporaryDirectory()
+            temp_files = []
+            try:
+                for img_data in reference_images:
+                    temp_path = os.path.join(temp_dir.name, f"reference_{idx}.png")
+                    with open(temp_path, "wb") as tmp:
+                        tmp.write(img_data)
+                    temp_files.append(temp_path)
+
+                result = await client.edit_image_async(
+                    image_path=temp_files[0],
+                    prompt=prompt,
+                    additional_images=temp_files[1:] if len(temp_files) > 1 else None,
+                    size=size
+                )
+            finally:
+                try:
+                    temp_dir.cleanup()
+                except OSError as cleanup_error:
+                    logging.warning(
+                        "Failed to clean up temporary directory %s: %s",
+                        temp_dir.name,
+                        cleanup_error,
+                    )
         else:
             result = await client.flux2edit_image_async(
                 images=reference_images,
