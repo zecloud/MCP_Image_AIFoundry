@@ -286,7 +286,7 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
             temp_dir = tempfile.TemporaryDirectory()
             temp_files = []
             try:
-                for img_data in reference_images:
+                for idx,img_data in enumerate(reference_images):
                     temp_path = os.path.join(temp_dir.name, f"reference_{idx}.png")
                     with open(temp_path, "wb") as tmp:
                         tmp.write(img_data)
