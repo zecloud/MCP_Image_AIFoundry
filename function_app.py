@@ -28,9 +28,10 @@ tool_properties_json = pydantic_to_tool_properties(ImageGenerationRequest)
 
 # Pydantic model for image editing request
 class ImageEditRequest(BaseModel):
-    """Request model for image editing using Flux Pro 2"""
+    """Request model for image editing using Flux Pro 2 or Flux Kontext"""
     filenames: list[str] = Field(..., description="List of filenames of reference images to use for editing (e.g., ['img-test-scene0-talk0.png', 'img-test-scene1-talk0.png'])")
     prompt: str = Field(..., description="The text description of how to edit the image")
+    use_flux_kontext: Optional[bool] = Field(default=False, description="If true, use Flux Kontext model for editing instead of Flux Pro 2")
     size: Optional[str] = Field(default="1024x1024", description="The size of the edited image (e.g., '1024x1024')")
     quality: Optional[str] = Field(default="standard", description="The quality of the edited image")
     n: Optional[int] = Field(default=1, description="The number of images to generate")
@@ -208,6 +209,7 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         # Extract parameters from arguments
         filenames = validated_input.filenames
         prompt = validated_input.prompt
+        use_flux_kontext = validated_input.use_flux_kontext
         size = validated_input.size
         quality = validated_input.quality
         n = validated_input.n
@@ -248,7 +250,10 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         # Get Azure OpenAI credentials from environment variables
         endpoint = os.environ.get('AZURE_OPENAI_ENDPOINT')
         api_key = os.environ.get('AZURE_OPENAI_API_KEY')
-        deployment_name = os.environ.get('AZURE_OPENAI_DEPLOYMENT_NAME', 'flux-pro-2')
+        if use_flux_kontext:
+            deployment_name = os.environ.get('AZURE_FLUX_KONTEXT_DEPLOYMENT_NAME', 'flux-kontext')
+        else:
+            deployment_name = os.environ.get('AZURE_OPENAI_DEPLOYMENT_NAME', 'flux-pro-2')
         
         if not endpoint or not api_key:
             error_msg = "Azure OpenAI credentials not configured"
@@ -275,11 +280,18 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         
         # Edit image asynchronously with multiple reference images
         logging.info(f"Editing with {len(reference_images)} reference images and prompt: {prompt}")
-        result = await client.flux2edit_image_async(
-            images=reference_images,  # Pass list of images
-            prompt=prompt,
-            size=size
-        )
+        if use_flux_kontext:
+            result = await client.edit_image_async(
+                images=reference_images,
+                prompt=prompt,
+                size=size
+            )
+        else:
+            result = await client.flux2edit_image_async(
+                images=reference_images,
+                prompt=prompt,
+                size=size
+            )
         
         if isinstance(result, str):
             # Si c'est un chemin de fichier, lire le fichier
