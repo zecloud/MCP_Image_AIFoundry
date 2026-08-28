@@ -64,8 +64,17 @@ def test_image_generation():
                 if isinstance(result, str):
                     result = json.loads(result)
 
-                image = result.get("content", [result])[0]
-                if image.get("type") == "image":
+                text = next(
+                    (item for item in result.get("content", []) if item.get("type") == "text"),
+                    None,
+                )
+                image = next(
+                    (item for item in result.get("content", []) if item.get("type") == "image"),
+                    None,
+                )
+                if text:
+                    print(f"\nImage metadata: {text.get('text')}")
+                if image:
                     print(f"\nImage MIME type: {image.get('mimeType')}")
                     print(f"Base64 payload length: {len(image.get('data', ''))}")
             else:

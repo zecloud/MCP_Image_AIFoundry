@@ -7,11 +7,11 @@ import azurefunctions.extensions.bindings.blob as blob
 import logging
 import json
 import os
-from mcp.types import ImageContent
+from mcp.types import CallToolResult, ImageContent, TextContent
 from pydantic import BaseModel, Field
-from AzureFunctionsMCPPydanticTool import pydantic_to_tool_properties
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
+urlstorage = os.environ.get("AgentVideoStorage__blobServiceUri", "").rstrip("/")
 
 
 def _image_content(image_bytes: bytes) -> ImageContent:
@@ -20,6 +20,28 @@ def _image_content(image_bytes: bytes) -> ImageContent:
         data=base64.b64encode(image_bytes).decode("ascii"),
         mimeType="image/png",
     )
+
+
+def _success_result(
+    image_bytes: bytes,
+    image_url: str,
+    **metadata,
+) -> CallToolResult:
+    response = {"status": "success", "image": image_url, **metadata}
+    return CallToolResult(
+        content=[
+            TextContent(type="text", text=json.dumps(response)),
+            _image_content(image_bytes),
+        ]
+    )
+
+
+def _error_result(message: str) -> CallToolResult:
+    return CallToolResult(
+        content=[TextContent(type="text", text=message)],
+        isError=True,
+    )
+
 
 # Pydantic model for image generation request
 class ImageGenerationRequest(BaseModel):
@@ -32,9 +54,6 @@ class ImageGenerationRequest(BaseModel):
     scene_number: Optional[int] = Field(default=0, description="Scene number for associating generated images with a specific scene in a video")
     talk_number: Optional[int] = Field(default=0, description="Talk number for associating generated images with a specific talk in a video")
     prefix: Optional[str] = Field(default="img", description="Prefix for the generated image filenames")
-
-# Convert Pydantic model to tool properties JSON
-tool_properties_json = pydantic_to_tool_properties(ImageGenerationRequest)
 
 # Pydantic model for image editing request
 class ImageEditRequest(BaseModel):
@@ -50,23 +69,32 @@ class ImageEditRequest(BaseModel):
     talk_number: Optional[int] = Field(default=0, description="Talk number for associating edited images with a specific talk in a video")
     prefix: Optional[str] = Field(default="edited", description="Prefix for the edited image filenames")
 
-# Convert Pydantic model for image editing to tool properties JSON
-edit_tool_properties_json = pydantic_to_tool_properties(ImageEditRequest)
-
-
-@app.generic_trigger(
-    arg_name="context",
-    type="mcpToolTrigger",
-    toolName="generate_image",
-    description="Generate images using Flux Pro 2 model via Azure AI Foundry. Provide a text prompt describing the image you want to create.",
-    toolProperties=tool_properties_json,
-)
+@app.mcp_tool(use_result_schema=True)
+@app.mcp_tool_property(arg_name="prompt", description="The text description of the image to generate")
+@app.mcp_tool_property(arg_name="size", description="The size of the generated image", is_required=False)
+@app.mcp_tool_property(arg_name="quality", description="The quality of the generated image", is_required=False)
+@app.mcp_tool_property(arg_name="n", description="The number of images to generate", property_type=func.McpPropertyType.INTEGER, is_required=False)
+@app.mcp_tool_property(arg_name="video_id", description="Video ID for associating generated images with a video", is_required=False)
+@app.mcp_tool_property(arg_name="scene_number", description="Scene number for associating generated images with a scene", property_type=func.McpPropertyType.INTEGER, is_required=False)
+@app.mcp_tool_property(arg_name="talk_number", description="Talk number for associating generated images with a talk", property_type=func.McpPropertyType.INTEGER, is_required=False)
+@app.mcp_tool_property(arg_name="prefix", description="Prefix for the generated image filename", is_required=False)
 @app.blob_output(
     arg_name="outputBlob",
     path="fluxjob/agentvideo/{arguments.video_id}/{arguments.prefix}-{arguments.video_id}-scene{arguments.scene_number}-talk{arguments.talk_number}.png",
     connection="AgentVideoStorage"
 )
-async def generate_image(context,outputBlob: func.Out[bytes]) -> ImageContent:
+async def generate_image(
+    context: func.MCPToolContext,
+    outputBlob: func.Out[bytes],
+    prompt: str,
+    size: Optional[str] = "1024x1024",
+    quality: Optional[str] = "standard",
+    n: Optional[int] = 1,
+    video_id: Optional[str] = "test",
+    scene_number: Optional[int] = 0,
+    talk_number: Optional[int] = 0,
+    prefix: Optional[str] = "img",
+) -> CallToolResult:
     """
     Azure Function with MCP trigger that generates images using Flux Pro 2
     via Azure AI Foundry.
@@ -75,22 +103,27 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> ImageContent:
         context: The MCP tool invocation context containing the request arguments
         
     Returns:
-        ImageContent: The generated PNG as base64-encoded MCP image content
+        CallToolResult: The image URL and generated PNG content
     """
     logging.info('MCP Image Generator function received a request.')
     
     try:
-        # Parse the context to extract arguments
-        content = json.loads(context)
-        arguments = content.get("arguments", {})
-        
-        logging.info(f"Request arguments: {json.dumps(arguments)}")
         try:
-            validated_input = ImageGenerationRequest(**arguments)
+            validated_input = ImageGenerationRequest(
+                prompt=prompt,
+                size=size,
+                quality=quality,
+                n=n,
+                video_id=video_id,
+                scene_number=scene_number,
+                talk_number=talk_number,
+                prefix=prefix,
+            )
         except Exception as e:
             error_msg = f"Image generation validation failed: {str(e)}"
             logging.error(error_msg)
             raise ValueError(error_msg) from e
+        logging.info(f"Request arguments: {validated_input.model_dump_json()}")
         # Extract parameters from arguments
         prompt = validated_input.prompt
         size = validated_input.size
@@ -152,25 +185,33 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> ImageContent:
         outputBlob.set(image_bytes)
 
         logging.info(f"Image generation completed successfully")
-        return _image_content(image_bytes)
+        blob_url = (
+            f"{urlstorage}/fluxjob/agentvideo/{video_id}/"
+            f"{prefix}-{video_id}-scene{scene_number}-talk{talk_number}.png"
+        )
+        return _success_result(image_bytes, blob_url)
         
     except ValueError as e:
         error_msg = f"Invalid request: {str(e)}"
         logging.error(error_msg)
-        raise
+        return _error_result(error_msg)
     except Exception as e:
         error_msg = f"Error generating image: {str(e)}"
         logging.error(error_msg, exc_info=True)
-        raise
+        return _error_result(error_msg)
 
 
-@app.generic_trigger(
-    arg_name="context",
-    type="mcpToolTrigger",
-    toolName="edit_image",
-    description="Edit images using Flux Pro 2 model via Azure AI Foundry. Provide a list of filenames and a text prompt describing the edits you want to make.",
-    toolProperties=edit_tool_properties_json,
-)
+@app.mcp_tool(use_result_schema=True)
+@app.mcp_tool_property(arg_name="filenames", description="List of reference image filenames", property_type=func.McpPropertyType.STRING, as_array=True)
+@app.mcp_tool_property(arg_name="prompt", description="The text description of how to edit the image")
+@app.mcp_tool_property(arg_name="use_flux_kontext", description="Use Flux Kontext instead of Flux Pro 2", property_type=func.McpPropertyType.BOOLEAN, is_required=False)
+@app.mcp_tool_property(arg_name="size", description="The size of the edited image", is_required=False)
+@app.mcp_tool_property(arg_name="quality", description="The quality of the edited image", is_required=False)
+@app.mcp_tool_property(arg_name="n", description="The number of images to generate", property_type=func.McpPropertyType.INTEGER, is_required=False)
+@app.mcp_tool_property(arg_name="video_id", description="Video ID for associating edited images with a video", is_required=False)
+@app.mcp_tool_property(arg_name="scene_number", description="Scene number for associating edited images with a scene", property_type=func.McpPropertyType.INTEGER, is_required=False)
+@app.mcp_tool_property(arg_name="talk_number", description="Talk number for associating edited images with a talk", property_type=func.McpPropertyType.INTEGER, is_required=False)
+@app.mcp_tool_property(arg_name="prefix", description="Prefix for the edited image filename", is_required=False)
 @app.blob_input(
     arg_name="containerClient",
     path="fluxjob",
@@ -181,7 +222,21 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> ImageContent:
     path="fluxjob/agentvideo/{arguments.video_id}/{arguments.prefix}-{arguments.video_id}-scene{arguments.scene_number}-talk{arguments.talk_number}.png",
     connection="AgentVideoStorage"
 )
-async def edit_image(context, containerClient: blob.ContainerClient, outputBlob: func.Out[bytes]) -> ImageContent:
+async def edit_image(
+    context: func.MCPToolContext,
+    containerClient: blob.ContainerClient,
+    outputBlob: func.Out[bytes],
+    filenames: list[str],
+    prompt: str,
+    use_flux_kontext: Optional[bool] = False,
+    size: Optional[str] = "1024x1024",
+    quality: Optional[str] = "standard",
+    n: Optional[int] = 1,
+    video_id: Optional[str] = "test",
+    scene_number: Optional[int] = 0,
+    talk_number: Optional[int] = 0,
+    prefix: Optional[str] = "edited",
+) -> CallToolResult:
     """
     Azure Function with MCP trigger that edits images using Flux Pro 2
     via Azure AI Foundry with multiple reference images.
@@ -192,22 +247,29 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         outputBlob: The output blob for the edited image
         
     Returns:
-        ImageContent: The edited PNG as base64-encoded MCP image content
+        CallToolResult: The image URL and edited PNG content
     """
     logging.info('MCP Image Editor function received a request.')
     
     try:
-        # Parse the context to extract arguments
-        content = json.loads(context)
-        arguments = content.get("arguments", {})
-        
-        logging.info(f"Request arguments: {json.dumps(arguments)}")
         try:
-            validated_input = ImageEditRequest(**arguments)
+            validated_input = ImageEditRequest(
+                filenames=filenames,
+                prompt=prompt,
+                use_flux_kontext=use_flux_kontext,
+                size=size,
+                quality=quality,
+                n=n,
+                video_id=video_id,
+                scene_number=scene_number,
+                talk_number=talk_number,
+                prefix=prefix,
+            )
         except Exception as e:
             error_msg = f"Image editing validation failed: {str(e)}"
             logging.error(error_msg)
             raise ValueError(error_msg) from e
+        logging.info(f"Request arguments: {validated_input.model_dump_json()}")
             
         # Extract parameters from arguments
         filenames = validated_input.filenames
@@ -327,16 +389,24 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         outputBlob.set(image_bytes)
 
         logging.info(f"Image editing completed successfully")
-        return _image_content(image_bytes)
+        blob_url = (
+            f"{urlstorage}/fluxjob/agentvideo/{video_id}/"
+            f"{prefix}-{video_id}-scene{scene_number}-talk{talk_number}.png"
+        )
+        return _success_result(
+            image_bytes,
+            blob_url,
+            reference_images_used=len(reference_images),
+        )
         
     except ValueError as e:
         error_msg = f"Invalid request: {str(e)}"
         logging.error(error_msg)
-        raise
+        return _error_result(error_msg)
     except Exception as e:
         error_msg = f"Error editing image: {str(e)}"
         logging.error(error_msg, exc_info=True)
-        raise
+        return _error_result(error_msg)
 
 
 

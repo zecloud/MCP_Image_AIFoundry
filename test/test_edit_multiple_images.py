@@ -69,8 +69,17 @@ def test_edit_image_single_reference():
                 if isinstance(result, str):
                     result = json.loads(result)
 
-                image = result.get("content", [result])[0]
-                if image.get("type") == "image":
+                text = next(
+                    (item for item in result.get("content", []) if item.get("type") == "text"),
+                    None,
+                )
+                image = next(
+                    (item for item in result.get("content", []) if item.get("type") == "image"),
+                    None,
+                )
+                if text:
+                    print(f"\nEdited image metadata: {text.get('text')}")
+                if image:
                     print(f"\nEdited image MIME type: {image.get('mimeType')}")
                     print(f"Base64 payload length: {len(image.get('data', ''))}")
             else:
@@ -138,8 +147,17 @@ def test_edit_image_multiple_references():
                 if isinstance(result, str):
                     result = json.loads(result)
 
-                image = result.get("content", [result])[0]
-                if image.get("type") == "image":
+                text = next(
+                    (item for item in result.get("content", []) if item.get("type") == "text"),
+                    None,
+                )
+                image = next(
+                    (item for item in result.get("content", []) if item.get("type") == "image"),
+                    None,
+                )
+                if text:
+                    print(f"\nEdited image metadata: {text.get('text')}")
+                if image:
                     print(f"\nEdited image MIME type: {image.get('mimeType')}")
                     print(f"Base64 payload length: {len(image.get('data', ''))}")
             else:
@@ -194,7 +212,12 @@ def test_edit_image_validation():
             else:
                 result = response_json
                 
-            if result.get("error"):
+            if result.get("isError"):
+                error_content = next(
+                    (item for item in result.get("content", []) if item.get("type") == "text"),
+                    {},
+                )
+                print(f"\nError: {error_content.get('text', 'Unknown error')}")
                 print("\n✓ Validation test passed! Empty filenames list properly rejected.")
             else:
                 print("\n✗ Validation test failed! Should have rejected empty filenames list.")
