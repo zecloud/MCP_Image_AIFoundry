@@ -109,9 +109,32 @@ The test script will:
 **Response:**
 ```json
 {
-  "type": "image",
-  "data": "<base64-encoded PNG>",
-  "mimeType": "image/png"
+  "content": [
+    {
+      "type": "text",
+      "text": "{\"status\":\"success\",\"image\":\"https://.../image.png\"}"
+    },
+    {
+      "type": "image",
+      "data": "<base64-encoded PNG>",
+      "mimeType": "image/png"
+    }
+  ],
+  "isError": false
+}
+```
+
+Errors use the same result shape and expose a client-readable message:
+
+```json
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "Invalid request: ..."
+    }
+  ],
+  "isError": true
 }
 ```
 
