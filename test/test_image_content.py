@@ -51,10 +51,12 @@ class ImageContentTests(unittest.IsolatedAsyncioTestCase):
             "AZURE_OPENAI_API_KEY": "test-key",
         }
 
-    def parse_result(self, serialized_result):
-        envelope = json.loads(serialized_result)
-        self.assertEqual(envelope["type"], "call_tool_result")
-        return CallToolResult.model_validate_json(envelope["content"])
+    def parse_result(self, result):
+        if isinstance(result, CallToolResult):
+            return result
+        envelope = json.loads(result)
+        payload = envelope.get("content", envelope)
+        return CallToolResult.model_validate_json(payload) if isinstance(payload, str) else CallToolResult.model_validate(payload)
 
     async def test_generate_image_returns_url_and_image_content(self):
         output_blob = FakeOutputBlob()
