@@ -1,16 +1,25 @@
-from typing import Optional
+import base64
 import tempfile
+from typing import Optional
 
 import azure.functions as func
 import azurefunctions.extensions.bindings.blob as blob
 import logging
 import json
 import os
+from mcp.types import ImageContent
 from pydantic import BaseModel, Field
 from AzureFunctionsMCPPydanticTool import pydantic_to_tool_properties
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
-urlstorage=os.environ.get('AgentVideoStorage__blobServiceUri', '')
+
+
+def _image_content(image_bytes: bytes) -> ImageContent:
+    return ImageContent(
+        type="image",
+        data=base64.b64encode(image_bytes).decode("ascii"),
+        mimeType="image/png",
+    )
 
 # Pydantic model for image generation request
 class ImageGenerationRequest(BaseModel):
@@ -57,7 +66,7 @@ edit_tool_properties_json = pydantic_to_tool_properties(ImageEditRequest)
     path="fluxjob/agentvideo/{arguments.video_id}/{arguments.prefix}-{arguments.video_id}-scene{arguments.scene_number}-talk{arguments.talk_number}.png",
     connection="AgentVideoStorage"
 )
-async def generate_image(context,outputBlob: func.Out[bytes]) -> str:
+async def generate_image(context,outputBlob: func.Out[bytes]) -> ImageContent:
     """
     Azure Function with MCP trigger that generates images using Flux Pro 2
     via Azure AI Foundry.
@@ -66,7 +75,7 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> str:
         context: The MCP tool invocation context containing the request arguments
         
     Returns:
-        str: JSON string with the generated image URLs and metadata
+        ImageContent: The generated PNG as base64-encoded MCP image content
     """
     logging.info('MCP Image Generator function received a request.')
     
@@ -79,9 +88,9 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> str:
         try:
             validated_input = ImageGenerationRequest(**arguments)
         except Exception as e:
-            error_response = {"success": False, "error": f"Validation échouée: {str(e)}"}
-            logging.error(f"Erreur dans generate_image: {str(error_response)}")
-            return json.dumps(error_response)
+            error_msg = f"Image generation validation failed: {str(e)}"
+            logging.error(error_msg)
+            raise ValueError(error_msg) from e
         # Extract parameters from arguments
         prompt = validated_input.prompt
         size = validated_input.size
@@ -95,7 +104,7 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> str:
         if not prompt:
             error_msg = "Missing required parameter: prompt"
             logging.error(error_msg)
-            return json.dumps({"error": error_msg})
+            raise ValueError(error_msg)
         
         # Get Azure OpenAI credentials from environment variables
         endpoint = os.environ.get('AZURE_OPENAI_ENDPOINT')
@@ -105,7 +114,7 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> str:
         if not endpoint or not api_key:
             error_msg = "Azure OpenAI credentials not configured"
             logging.error(error_msg)
-            return json.dumps({"error": error_msg})
+            raise RuntimeError(error_msg)
         
         # Import the image generation client
         try:
@@ -113,7 +122,7 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> str:
         except ImportError as e:
             error_msg = f"Image client library not available: {str(e)}"
             logging.error(error_msg)
-            return json.dumps({"error": error_msg})
+            raise RuntimeError(error_msg) from e
         
         # Initialize the image client
         logging.info(f"Initializing Azure OpenAI Image Client for deployment: {deployment_name}")
@@ -143,23 +152,16 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> str:
         outputBlob.set(image_bytes)
 
         logging.info(f"Image generation completed successfully")
-        blob_url = f"{urlstorage}/fluxjob/agentvideo/{video_id}/{prefix}-{video_id}-scene{scene_number}-talk{talk_number}.png"
-        # Format response
-        response = {
-            "status": "success",
-            "image": blob_url,
-        }
-        
-        return json.dumps(response)
+        return _image_content(image_bytes)
         
     except ValueError as e:
         error_msg = f"Invalid request: {str(e)}"
         logging.error(error_msg)
-        return json.dumps({"error": error_msg})
+        raise
     except Exception as e:
         error_msg = f"Error generating image: {str(e)}"
         logging.error(error_msg, exc_info=True)
-        return json.dumps({"error": error_msg})
+        raise
 
 
 @app.generic_trigger(
@@ -179,7 +181,7 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> str:
     path="fluxjob/agentvideo/{arguments.video_id}/{arguments.prefix}-{arguments.video_id}-scene{arguments.scene_number}-talk{arguments.talk_number}.png",
     connection="AgentVideoStorage"
 )
-async def edit_image(context, containerClient: blob.ContainerClient, outputBlob: func.Out[bytes]) -> str:
+async def edit_image(context, containerClient: blob.ContainerClient, outputBlob: func.Out[bytes]) -> ImageContent:
     """
     Azure Function with MCP trigger that edits images using Flux Pro 2
     via Azure AI Foundry with multiple reference images.
@@ -190,7 +192,7 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         outputBlob: The output blob for the edited image
         
     Returns:
-        str: JSON string with the edited image URL and metadata
+        ImageContent: The edited PNG as base64-encoded MCP image content
     """
     logging.info('MCP Image Editor function received a request.')
     
@@ -203,9 +205,9 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         try:
             validated_input = ImageEditRequest(**arguments)
         except Exception as e:
-            error_response = {"success": False, "error": f"Validation échouée: {str(e)}"}
-            logging.error(f"Erreur dans edit_image: {str(error_response)}")
-            return json.dumps(error_response)
+            error_msg = f"Image editing validation failed: {str(e)}"
+            logging.error(error_msg)
+            raise ValueError(error_msg) from e
             
         # Extract parameters from arguments
         filenames = validated_input.filenames
@@ -228,7 +230,7 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         if missing_params:
             error_msg = f"Missing required parameter(s): {', '.join(missing_params)}"
             logging.error(error_msg)
-            return json.dumps({"error": error_msg})
+            raise ValueError(error_msg)
         
         # Download all reference images using ContainerClient
         reference_images = []
@@ -246,7 +248,7 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
             except Exception as e:
                 error_msg = f"Failed to download image {filename}: {str(e)}"
                 logging.error(error_msg)
-                return json.dumps({"error": error_msg})
+                raise RuntimeError(error_msg) from e
         
         # Get Azure OpenAI credentials from environment variables
         endpoint = os.environ.get('AZURE_OPENAI_ENDPOINT')
@@ -259,7 +261,7 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         if not endpoint or not api_key:
             error_msg = "Azure OpenAI credentials not configured"
             logging.error(error_msg)
-            return json.dumps({"error": error_msg})
+            raise RuntimeError(error_msg)
         
         # Import the image generation client
         try:
@@ -267,7 +269,7 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         except ImportError as e:
             error_msg = f"Image client library not available: {str(e)}"
             logging.error(error_msg)
-            return json.dumps({"error": error_msg})
+            raise RuntimeError(error_msg) from e
         
         # Initialize the image client
         logging.info(f"Initializing Azure OpenAI Image Client for editing with deployment: {deployment_name}")
@@ -325,25 +327,16 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         outputBlob.set(image_bytes)
 
         logging.info(f"Image editing completed successfully")
-        blob_url = f"{urlstorage}/fluxjob/agentvideo/{video_id}/{prefix}-{video_id}-scene{scene_number}-talk{talk_number}.png"
-        
-        # Format response
-        response = {
-            "status": "success",
-            "image": blob_url,
-            "reference_images_used": len(reference_images)
-        }
-        
-        return json.dumps(response)
+        return _image_content(image_bytes)
         
     except ValueError as e:
         error_msg = f"Invalid request: {str(e)}"
         logging.error(error_msg)
-        return json.dumps({"error": error_msg})
+        raise
     except Exception as e:
         error_msg = f"Error editing image: {str(e)}"
         logging.error(error_msg, exc_info=True)
-        return json.dumps({"error": error_msg})
+        raise
 
 
 
@@ -374,4 +367,3 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
 #     }
     
 #     return json.dumps(response)
-

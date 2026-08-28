@@ -109,14 +109,9 @@ The test script will:
 **Response:**
 ```json
 {
-  "status": "success",
-  "images": [
-    {
-      "url": "https://...",
-      "revised_prompt": "..."
-    }
-  ],
-  "created": 1234567890
+  "type": "image",
+  "data": "<base64-encoded PNG>",
+  "mimeType": "image/png"
 }
 ```
 

@@ -60,17 +60,14 @@ def test_image_generation():
             if response.status_code == 200:
                 print("\n✓ Test passed! Image generated successfully.")
                 
-                # Parse the result if it's a JSON string
-                if isinstance(response_json, str):
-                    result = json.loads(response_json)
-                else:
-                    result = response_json
-                    
-                if result.get("images"):
-                    for idx, image in enumerate(result["images"]):
-                        print(f"\nImage {idx + 1}:")
-                        print(f"  URL: {image.get('url', 'N/A')}")
-                        print(f"  Revised Prompt: {image.get('revised_prompt', 'N/A')}")
+                result = response_json
+                if isinstance(result, str):
+                    result = json.loads(result)
+
+                image = result.get("content", [result])[0]
+                if image.get("type") == "image":
+                    print(f"\nImage MIME type: {image.get('mimeType')}")
+                    print(f"Base64 payload length: {len(image.get('data', ''))}")
             else:
                 print("\n✗ Test failed!")
         except json.JSONDecodeError:
@@ -142,4 +139,3 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     test_image_generation()
     print("=" * 60)
-
