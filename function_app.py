@@ -88,9 +88,9 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> ImageContent:
         try:
             validated_input = ImageGenerationRequest(**arguments)
         except Exception as e:
-            error_response = {"success": False, "error": f"Validation échouée: {str(e)}"}
-            logging.error(f"Erreur dans generate_image: {str(error_response)}")
-            return json.dumps(error_response)
+            error_msg = f"Image generation validation failed: {str(e)}"
+            logging.error(error_msg)
+            raise ValueError(error_msg) from e
         # Extract parameters from arguments
         prompt = validated_input.prompt
         size = validated_input.size
@@ -104,7 +104,7 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> ImageContent:
         if not prompt:
             error_msg = "Missing required parameter: prompt"
             logging.error(error_msg)
-            return json.dumps({"error": error_msg})
+            raise ValueError(error_msg)
         
         # Get Azure OpenAI credentials from environment variables
         endpoint = os.environ.get('AZURE_OPENAI_ENDPOINT')
@@ -114,7 +114,7 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> ImageContent:
         if not endpoint or not api_key:
             error_msg = "Azure OpenAI credentials not configured"
             logging.error(error_msg)
-            return json.dumps({"error": error_msg})
+            raise RuntimeError(error_msg)
         
         # Import the image generation client
         try:
@@ -122,7 +122,7 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> ImageContent:
         except ImportError as e:
             error_msg = f"Image client library not available: {str(e)}"
             logging.error(error_msg)
-            return json.dumps({"error": error_msg})
+            raise RuntimeError(error_msg) from e
         
         # Initialize the image client
         logging.info(f"Initializing Azure OpenAI Image Client for deployment: {deployment_name}")
@@ -157,11 +157,11 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> ImageContent:
     except ValueError as e:
         error_msg = f"Invalid request: {str(e)}"
         logging.error(error_msg)
-        return json.dumps({"error": error_msg})
+        raise
     except Exception as e:
         error_msg = f"Error generating image: {str(e)}"
         logging.error(error_msg, exc_info=True)
-        return json.dumps({"error": error_msg})
+        raise
 
 
 @app.generic_trigger(
@@ -205,9 +205,9 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         try:
             validated_input = ImageEditRequest(**arguments)
         except Exception as e:
-            error_response = {"success": False, "error": f"Validation échouée: {str(e)}"}
-            logging.error(f"Erreur dans edit_image: {str(error_response)}")
-            return json.dumps(error_response)
+            error_msg = f"Image editing validation failed: {str(e)}"
+            logging.error(error_msg)
+            raise ValueError(error_msg) from e
             
         # Extract parameters from arguments
         filenames = validated_input.filenames
@@ -230,7 +230,7 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         if missing_params:
             error_msg = f"Missing required parameter(s): {', '.join(missing_params)}"
             logging.error(error_msg)
-            return json.dumps({"error": error_msg})
+            raise ValueError(error_msg)
         
         # Download all reference images using ContainerClient
         reference_images = []
@@ -248,7 +248,7 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
             except Exception as e:
                 error_msg = f"Failed to download image {filename}: {str(e)}"
                 logging.error(error_msg)
-                return json.dumps({"error": error_msg})
+                raise RuntimeError(error_msg) from e
         
         # Get Azure OpenAI credentials from environment variables
         endpoint = os.environ.get('AZURE_OPENAI_ENDPOINT')
@@ -261,7 +261,7 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         if not endpoint or not api_key:
             error_msg = "Azure OpenAI credentials not configured"
             logging.error(error_msg)
-            return json.dumps({"error": error_msg})
+            raise RuntimeError(error_msg)
         
         # Import the image generation client
         try:
@@ -269,7 +269,7 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         except ImportError as e:
             error_msg = f"Image client library not available: {str(e)}"
             logging.error(error_msg)
-            return json.dumps({"error": error_msg})
+            raise RuntimeError(error_msg) from e
         
         # Initialize the image client
         logging.info(f"Initializing Azure OpenAI Image Client for editing with deployment: {deployment_name}")
@@ -332,11 +332,11 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
     except ValueError as e:
         error_msg = f"Invalid request: {str(e)}"
         logging.error(error_msg)
-        return json.dumps({"error": error_msg})
+        raise
     except Exception as e:
         error_msg = f"Error editing image: {str(e)}"
         logging.error(error_msg, exc_info=True)
-        return json.dumps({"error": error_msg})
+        raise
 
 
 

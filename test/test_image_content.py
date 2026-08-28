@@ -94,6 +94,33 @@ class ImageContentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(base64.b64decode(result.data), b"edited-image")
         self.assertEqual(output_blob.value, b"edited-image")
 
+    async def test_generate_image_raises_when_credentials_are_missing(self):
+        context = json.dumps({"arguments": {"prompt": "A mountain"}})
+
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Azure OpenAI credentials not configured",
+            ):
+                await function_app.generate_image(context, FakeOutputBlob())
+
+    async def test_edit_image_raises_for_empty_reference_list(self):
+        context = json.dumps(
+            {
+                "arguments": {
+                    "filenames": [],
+                    "prompt": "Make it brighter",
+                }
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "filenames list"):
+            await function_app.edit_image(
+                context,
+                FakeContainerClient(),
+                FakeOutputBlob(),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
