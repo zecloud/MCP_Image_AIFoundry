@@ -14,14 +14,6 @@ app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 urlstorage = os.environ.get("AgentVideoStorage__blobServiceUri", "").rstrip("/")
 
 
-def _image_content(image_bytes: bytes) -> ImageContent:
-    return ImageContent(
-        type="image",
-        data=base64.b64encode(image_bytes).decode("ascii"),
-        mimeType="image/png",
-    )
-
-
 def _success_result(
     image_bytes: bytes,
     image_url: str,
@@ -31,7 +23,11 @@ def _success_result(
     return CallToolResult(
         content=[
             TextContent(type="text", text=json.dumps(response)),
-            _image_content(image_bytes),
+            ImageContent(
+                type="image",
+                data=base64.b64encode(image_bytes).decode('utf-8'),
+                mimeType="image/png",
+            )
         ]
     )
 
