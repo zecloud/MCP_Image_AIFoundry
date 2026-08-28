@@ -1,16 +1,25 @@
-from typing import Optional
+import base64
 import tempfile
+from typing import Optional
 
 import azure.functions as func
 import azurefunctions.extensions.bindings.blob as blob
 import logging
 import json
 import os
+from mcp.types import ImageContent
 from pydantic import BaseModel, Field
 from AzureFunctionsMCPPydanticTool import pydantic_to_tool_properties
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
-urlstorage=os.environ.get('AgentVideoStorage__blobServiceUri', '')
+
+
+def _image_content(image_bytes: bytes) -> ImageContent:
+    return ImageContent(
+        type="image",
+        data=base64.b64encode(image_bytes).decode("ascii"),
+        mimeType="image/png",
+    )
 
 # Pydantic model for image generation request
 class ImageGenerationRequest(BaseModel):
@@ -57,7 +66,7 @@ edit_tool_properties_json = pydantic_to_tool_properties(ImageEditRequest)
     path="fluxjob/agentvideo/{arguments.video_id}/{arguments.prefix}-{arguments.video_id}-scene{arguments.scene_number}-talk{arguments.talk_number}.png",
     connection="AgentVideoStorage"
 )
-async def generate_image(context,outputBlob: func.Out[bytes]) -> str:
+async def generate_image(context,outputBlob: func.Out[bytes]) -> ImageContent:
     """
     Azure Function with MCP trigger that generates images using Flux Pro 2
     via Azure AI Foundry.
@@ -66,7 +75,7 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> str:
         context: The MCP tool invocation context containing the request arguments
         
     Returns:
-        str: JSON string with the generated image URLs and metadata
+        ImageContent: The generated PNG as base64-encoded MCP image content
     """
     logging.info('MCP Image Generator function received a request.')
     
@@ -143,14 +152,7 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> str:
         outputBlob.set(image_bytes)
 
         logging.info(f"Image generation completed successfully")
-        blob_url = f"{urlstorage}/fluxjob/agentvideo/{video_id}/{prefix}-{video_id}-scene{scene_number}-talk{talk_number}.png"
-        # Format response
-        response = {
-            "status": "success",
-            "image": blob_url,
-        }
-        
-        return json.dumps(response)
+        return _image_content(image_bytes)
         
     except ValueError as e:
         error_msg = f"Invalid request: {str(e)}"
@@ -179,7 +181,7 @@ async def generate_image(context,outputBlob: func.Out[bytes]) -> str:
     path="fluxjob/agentvideo/{arguments.video_id}/{arguments.prefix}-{arguments.video_id}-scene{arguments.scene_number}-talk{arguments.talk_number}.png",
     connection="AgentVideoStorage"
 )
-async def edit_image(context, containerClient: blob.ContainerClient, outputBlob: func.Out[bytes]) -> str:
+async def edit_image(context, containerClient: blob.ContainerClient, outputBlob: func.Out[bytes]) -> ImageContent:
     """
     Azure Function with MCP trigger that edits images using Flux Pro 2
     via Azure AI Foundry with multiple reference images.
@@ -190,7 +192,7 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         outputBlob: The output blob for the edited image
         
     Returns:
-        str: JSON string with the edited image URL and metadata
+        ImageContent: The edited PNG as base64-encoded MCP image content
     """
     logging.info('MCP Image Editor function received a request.')
     
@@ -325,16 +327,7 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
         outputBlob.set(image_bytes)
 
         logging.info(f"Image editing completed successfully")
-        blob_url = f"{urlstorage}/fluxjob/agentvideo/{video_id}/{prefix}-{video_id}-scene{scene_number}-talk{talk_number}.png"
-        
-        # Format response
-        response = {
-            "status": "success",
-            "image": blob_url,
-            "reference_images_used": len(reference_images)
-        }
-        
-        return json.dumps(response)
+        return _image_content(image_bytes)
         
     except ValueError as e:
         error_msg = f"Invalid request: {str(e)}"
@@ -374,4 +367,3 @@ async def edit_image(context, containerClient: blob.ContainerClient, outputBlob:
 #     }
     
 #     return json.dumps(response)
-

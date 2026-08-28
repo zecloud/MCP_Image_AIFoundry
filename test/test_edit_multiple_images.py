@@ -65,15 +65,14 @@ def test_edit_image_single_reference():
             if response.status_code == 200:
                 print("\n✓ Test passed! Image edited successfully with 1 reference image.")
                 
-                # Parse the result if it's a JSON string
-                if isinstance(response_json, str):
-                    result = json.loads(response_json)
-                else:
-                    result = response_json
-                    
-                if result.get("image"):
-                    print(f"\nEdited Image URL: {result.get('image')}")
-                    print(f"Reference Images Used: {result.get('reference_images_used', 'N/A')}")
+                result = response_json
+                if isinstance(result, str):
+                    result = json.loads(result)
+
+                image = result.get("content", [result])[0]
+                if image.get("type") == "image":
+                    print(f"\nEdited image MIME type: {image.get('mimeType')}")
+                    print(f"Base64 payload length: {len(image.get('data', ''))}")
             else:
                 print("\n✗ Test failed!")
         except json.JSONDecodeError:
@@ -135,15 +134,14 @@ def test_edit_image_multiple_references():
             if response.status_code == 200:
                 print("\n✓ Test passed! Image edited successfully with multiple reference images.")
                 
-                # Parse the result if it's a JSON string
-                if isinstance(response_json, str):
-                    result = json.loads(response_json)
-                else:
-                    result = response_json
-                    
-                if result.get("image"):
-                    print(f"\nEdited Image URL: {result.get('image')}")
-                    print(f"Reference Images Used: {result.get('reference_images_used', 'N/A')}")
+                result = response_json
+                if isinstance(result, str):
+                    result = json.loads(result)
+
+                image = result.get("content", [result])[0]
+                if image.get("type") == "image":
+                    print(f"\nEdited image MIME type: {image.get('mimeType')}")
+                    print(f"Base64 payload length: {len(image.get('data', ''))}")
             else:
                 print("\n✗ Test failed!")
         except json.JSONDecodeError:
