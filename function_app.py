@@ -1,5 +1,6 @@
 import base64
 import tempfile
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import azure.functions as func
@@ -7,11 +8,63 @@ import azurefunctions.extensions.bindings.blob as blob
 import logging
 import json
 import os
+from azure.identity import DefaultAzureCredential, ManagedIdentityCredential
+from azure.storage.blob import (
+    BlobSasPermissions,
+    BlobServiceClient,
+    generate_blob_sas,
+)
 from mcp.types import CallToolResult, ImageContent, TextContent
 from pydantic import BaseModel, Field
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 urlstorage = os.environ.get("AgentVideoStorage__blobServiceUri", "").rstrip("/")
+blob_container_name = "fluxjob"
+read_sas_lifetime = timedelta(hours=1)
+
+
+def _get_storage_credential():
+    client_id = (
+        os.environ.get("AgentVideoStorage__clientId")
+        or os.environ.get("AZURE_CLIENT_ID")
+    )
+    if os.environ.get("AZURE_FUNCTIONS_ENVIRONMENT") == "Development":
+        return DefaultAzureCredential(managed_identity_client_id=client_id)
+    return ManagedIdentityCredential(client_id=client_id)
+
+
+def _append_read_sas(blob_url: str, blob_name: str) -> str:
+    if not urlstorage:
+        raise RuntimeError(
+            "AgentVideoStorage__blobServiceUri is required to generate a SAS URL"
+        )
+
+    now = datetime.now(timezone.utc)
+    start_time = now - timedelta(minutes=5)
+    expiry_time = now + read_sas_lifetime
+    credential = _get_storage_credential()
+    try:
+        with BlobServiceClient(
+            account_url=urlstorage,
+            credential=credential,
+        ) as service_client:
+            delegation_key = service_client.get_user_delegation_key(
+                key_start_time=start_time,
+                key_expiry_time=expiry_time,
+            )
+            sas_token = generate_blob_sas(
+                account_name=service_client.account_name,
+                container_name=blob_container_name,
+                blob_name=blob_name,
+                user_delegation_key=delegation_key,
+                permission=BlobSasPermissions(read=True),
+                start=start_time,
+                expiry=expiry_time,
+            )
+    finally:
+        credential.close()
+
+    return f"{blob_url}?{sas_token}"
 
 
 def _success_result(
@@ -50,6 +103,7 @@ class ImageGenerationRequest(BaseModel):
     scene_number: Optional[int] = Field(default=0, description="Scene number for associating generated images with a specific scene in a video")
     talk_number: Optional[int] = Field(default=0, description="Talk number for associating generated images with a specific talk in a video")
     prefix: Optional[str] = Field(default="img", description="Prefix for the generated image filenames")
+    sas: bool = Field(default=False, description="If true, return a read-only SAS URL for the generated image")
 
 # Pydantic model for image editing request
 class ImageEditRequest(BaseModel):
@@ -64,6 +118,7 @@ class ImageEditRequest(BaseModel):
     scene_number: Optional[int] = Field(default=0, description="Scene number for associating edited images with a specific scene in a video")
     talk_number: Optional[int] = Field(default=0, description="Talk number for associating edited images with a specific talk in a video")
     prefix: Optional[str] = Field(default="edited", description="Prefix for the edited image filenames")
+    sas: bool = Field(default=False, description="If true, return a read-only SAS URL for the edited image")
 
 @app.mcp_tool(use_result_schema=True)
 @app.mcp_tool_property(arg_name="prompt", description="The text description of the image to generate")
@@ -74,6 +129,7 @@ class ImageEditRequest(BaseModel):
 @app.mcp_tool_property(arg_name="scene_number", description="Scene number for associating generated images with a scene", property_type=func.McpPropertyType.INTEGER, is_required=False)
 @app.mcp_tool_property(arg_name="talk_number", description="Talk number for associating generated images with a talk", property_type=func.McpPropertyType.INTEGER, is_required=False)
 @app.mcp_tool_property(arg_name="prefix", description="Prefix for the generated image filename", is_required=False)
+@app.mcp_tool_property(arg_name="sas", description="Return a read-only SAS URL for the generated image", property_type=func.McpPropertyType.BOOLEAN, is_required=False)
 @app.blob_output(
     arg_name="outputBlob",
     path="fluxjob/agentvideo/{arguments.video_id}/{arguments.prefix}-{arguments.video_id}-scene{arguments.scene_number}-talk{arguments.talk_number}.png",
@@ -90,6 +146,7 @@ async def generate_image(
     scene_number: Optional[int] = 0,
     talk_number: Optional[int] = 0,
     prefix: Optional[str] = "img",
+    sas: bool = False,
 ) -> CallToolResult:
     """
     Azure Function with MCP trigger that generates images using Flux Pro 2
@@ -114,6 +171,7 @@ async def generate_image(
                 scene_number=scene_number,
                 talk_number=talk_number,
                 prefix=prefix,
+                sas=sas,
             )
         except Exception as e:
             error_msg = f"Image generation validation failed: {str(e)}"
@@ -129,6 +187,7 @@ async def generate_image(
         scene_number = validated_input.scene_number
         talk_number = validated_input.talk_number
         prefix = validated_input.prefix
+        sas = validated_input.sas
         # Validate required parameters
         if not prompt:
             error_msg = "Missing required parameter: prompt"
@@ -181,10 +240,13 @@ async def generate_image(
         outputBlob.set(image_bytes)
 
         logging.info(f"Image generation completed successfully")
-        blob_url = (
-            f"{urlstorage}/fluxjob/agentvideo/{video_id}/"
+        blob_name = (
+            f"agentvideo/{video_id}/"
             f"{prefix}-{video_id}-scene{scene_number}-talk{talk_number}.png"
         )
+        blob_url = f"{urlstorage}/{blob_container_name}/{blob_name}"
+        if sas:
+            blob_url = _append_read_sas(blob_url, blob_name)
         return _success_result(image_bytes, blob_url)
         
     except ValueError as e:
@@ -208,6 +270,7 @@ async def generate_image(
 @app.mcp_tool_property(arg_name="scene_number", description="Scene number for associating edited images with a scene", property_type=func.McpPropertyType.INTEGER, is_required=False)
 @app.mcp_tool_property(arg_name="talk_number", description="Talk number for associating edited images with a talk", property_type=func.McpPropertyType.INTEGER, is_required=False)
 @app.mcp_tool_property(arg_name="prefix", description="Prefix for the edited image filename", is_required=False)
+@app.mcp_tool_property(arg_name="sas", description="Return a read-only SAS URL for the edited image", property_type=func.McpPropertyType.BOOLEAN, is_required=False)
 @app.blob_input(
     arg_name="containerClient",
     path="fluxjob",
@@ -232,6 +295,7 @@ async def edit_image(
     scene_number: Optional[int] = 0,
     talk_number: Optional[int] = 0,
     prefix: Optional[str] = "edited",
+    sas: bool = False,
 ) -> CallToolResult:
     """
     Azure Function with MCP trigger that edits images using Flux Pro 2
@@ -260,6 +324,7 @@ async def edit_image(
                 scene_number=scene_number,
                 talk_number=talk_number,
                 prefix=prefix,
+                sas=sas,
             )
         except Exception as e:
             error_msg = f"Image editing validation failed: {str(e)}"
@@ -278,6 +343,7 @@ async def edit_image(
         scene_number = validated_input.scene_number
         talk_number = validated_input.talk_number
         prefix = validated_input.prefix
+        sas = validated_input.sas
         
         # Validate required parameters
         missing_params = []
@@ -385,10 +451,13 @@ async def edit_image(
         outputBlob.set(image_bytes)
 
         logging.info(f"Image editing completed successfully")
-        blob_url = (
-            f"{urlstorage}/fluxjob/agentvideo/{video_id}/"
+        blob_name = (
+            f"agentvideo/{video_id}/"
             f"{prefix}-{video_id}-scene{scene_number}-talk{talk_number}.png"
         )
+        blob_url = f"{urlstorage}/{blob_container_name}/{blob_name}"
+        if sas:
+            blob_url = _append_read_sas(blob_url, blob_name)
         return _success_result(
             image_bytes,
             blob_url,
