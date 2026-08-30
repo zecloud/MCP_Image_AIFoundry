@@ -92,6 +92,7 @@ The test script will:
 - `size` (optional, string): Image size, default is "1024x1024"
 - `quality` (optional, string): Image quality, default is "standard"
 - `n` (optional, number): Number of images to generate, default is 1
+- `sas` (optional, boolean): When `true`, return a read-only SAS URL valid for 60 minutes; default is `false`
 
 **Example MCP Tool Call:**
 ```json
@@ -101,7 +102,8 @@ The test script will:
     "prompt": "A beautiful sunset over mountains",
     "size": "1024x1024",
     "quality": "standard",
-    "n": 1
+    "n": 1,
+    "sas": true
   }
 }
 ```
@@ -165,6 +167,11 @@ Make sure to configure the application settings in Azure:
 - `AZURE_OPENAI_ENDPOINT`
 - `AZURE_OPENAI_API_KEY`
 - `AZURE_OPENAI_DEPLOYMENT_NAME`
+- `AgentVideoStorage__blobServiceUri`
+
+Generating SAS URLs requires the Function App managed identity to have the
+**Storage Blob Delegator** role on the storage account. The existing Blob
+binding permissions are still required to write generated images.
 
 ## Project Structure
 
@@ -183,7 +190,9 @@ MCP_Image_AIFoundry/
 
 ## Dependencies
 
-- `azure-functions>=1.18.0`: Azure Functions Python worker
+- `azure-functions>=1.26.0b3`: Azure Functions Python worker
+- `azure-identity`: Passwordless authentication with the Function App managed identity
+- `azure-storage-blob`: Read-only user delegation SAS generation
 - `azureopenaigptimageclient`: Azure OpenAI Image Client for Flux Pro 2
 - `azurefunctionsmcpydantic`: Pydantic to MCP tool properties converter
 - `pydantic>=2.0.0`: Data validation and settings management
