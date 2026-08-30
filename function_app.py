@@ -132,7 +132,7 @@ class ImageEditRequest(BaseModel):
 @app.mcp_tool_property(arg_name="sas", description="Return a read-only SAS URL for the generated image", property_type=func.McpPropertyType.BOOLEAN, is_required=False)
 @app.blob_output(
     arg_name="outputBlob",
-    path="fluxjob/agentvideo/{arguments.video_id}/{arguments.prefix}-{arguments.video_id}-scene{arguments.scene_number}-talk{arguments.talk_number}.png",
+    path=blob_container_name + "/agentvideo/{arguments.video_id}/{arguments.prefix}-{arguments.video_id}-scene{arguments.scene_number}-talk{arguments.talk_number}.png",
     connection="AgentVideoStorage"
 )
 async def generate_image(
@@ -273,12 +273,12 @@ async def generate_image(
 @app.mcp_tool_property(arg_name="sas", description="Return a read-only SAS URL for the edited image", property_type=func.McpPropertyType.BOOLEAN, is_required=False)
 @app.blob_input(
     arg_name="containerClient",
-    path="fluxjob",
+    path=blob_container_name,
     connection="AgentVideoStorage"
 )
 @app.blob_output(
     arg_name="outputBlob",
-    path="fluxjob/agentvideo/{arguments.video_id}/{arguments.prefix}-{arguments.video_id}-scene{arguments.scene_number}-talk{arguments.talk_number}.png",
+    path=blob_container_name + "/agentvideo/{arguments.video_id}/{arguments.prefix}-{arguments.video_id}-scene{arguments.scene_number}-talk{arguments.talk_number}.png",
     connection="AgentVideoStorage"
 )
 async def edit_image(

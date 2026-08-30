@@ -190,7 +190,7 @@ MCP_Image_AIFoundry/
 
 ## Dependencies
 
-- `azure-functions>=1.18.0`: Azure Functions Python worker
+- `azure-functions>=1.26.0b3`: Azure Functions Python worker
 - `azure-identity`: Passwordless authentication with the Function App managed identity
 - `azure-storage-blob`: Read-only user delegation SAS generation
 - `azureopenaigptimageclient`: Azure OpenAI Image Client for Flux Pro 2
