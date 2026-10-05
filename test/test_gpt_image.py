@@ -137,7 +137,7 @@ class GptSdkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, PNG)
         self.assertEqual(len(requests), 1)
         request = requests[0]
-        self.assertEqual(str(request.url), "https://foundry.example.test/openai/v1/images/generations")
+        self.assertEqual(str(request.url), "https://foundry.example.test/openai/v1/images/generations?api-version=preview")
         self.assertEqual(request.headers["authorization"], "Bearer test-key")
         self.assertEqual(json.loads(request.content), {
             "model": "my-image-deployment", "prompt": "A landscape",
@@ -149,7 +149,7 @@ class GptSdkTests(unittest.IsolatedAsyncioTestCase):
         result, requests = await self.run_request(images=[PNG, jpeg])
         self.assertEqual(result, PNG)
         request = requests[0]
-        self.assertEqual(str(request.url), "https://foundry.example.test/openai/v1/images/edits")
+        self.assertEqual(str(request.url), "https://foundry.example.test/openai/v1/images/edits?api-version=preview")
         self.assertIn("multipart/form-data", request.headers["content-type"])
         self.assertIn(b'filename="reference_0.png"', request.content)
         self.assertIn(b'filename="reference_1.jpg"', request.content)
@@ -314,6 +314,10 @@ class GptMcpTests(unittest.IsolatedAsyncioTestCase):
 
         def handler(request):
             requests.append(request)
+            if request.url.params.get("api-version") != "preview":
+                return httpx.Response(400, json={
+                    "error": {"message": "Missing or invalid api-version"},
+                })
             return httpx.Response(200, json={
                 "created": 1, "data": [{"b64_json": base64.b64encode(PNG).decode()}],
             })
@@ -350,6 +354,9 @@ class GptMcpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(base64.b64decode(result.content[1].data), PNG)
         self.assertEqual([request.url.path for request in requests], [
             "/openai/v1/images/generations", "/openai/v1/images/edits",
+        ])
+        self.assertEqual([dict(request.url.params) for request in requests], [
+            {"api-version": "preview"}, {"api-version": "preview"},
         ])
 
     async def test_invalid_reference_does_not_submit_or_write(self):

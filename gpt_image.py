@@ -95,6 +95,7 @@ async def generate_gpt_image(endpoint, api_key, prompt, size, quality, n, images
     async with AsyncOpenAI(
         base_url=_base_url(endpoint),
         api_key=api_key,
+        default_query={"api-version": "preview"},
         timeout=300.0,
         max_retries=0,
     ) as client:

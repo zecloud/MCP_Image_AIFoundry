@@ -155,8 +155,11 @@ reuse `AZURE_OPENAI_ENDPOINT` and `AZURE_OPENAI_API_KEY`. FLUX still uses
 The endpoint must be the HTTPS Foundry resource URL (for example,
 `https://your-resource.openai.azure.com/` or `https://your-resource.services.ai.azure.com/`),
 or its `/openai/v1/` base URL. Project endpoints such as `/api/projects/...` are
-not supported by the image API. The adapter uses `/openai/v1/images/generations`
-and `/openai/v1/images/edits` and explicitly requests PNG output.
+not supported by the image API. The adapter uses
+`/openai/v1/images/generations?api-version=preview` and
+`/openai/v1/images/edits?api-version=preview` and explicitly requests PNG output.
+The preview query is configured on the GPT client's `default_query`; no query
+needs to be added to `AZURE_OPENAI_ENDPOINT`.
 
 GPT parameters:
 - `quality`: `auto`, `low`, `medium`, `high`, `xhigh` or `max`. The existing
