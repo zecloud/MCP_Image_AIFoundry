@@ -5,4 +5,5 @@ azure-storage-blob
 git+https://github.com/zecloud/azureopenaigptimageclient.git#subdirectory=Image
 mcp
 pydantic
+openai>=2.32.0,<3
 requests

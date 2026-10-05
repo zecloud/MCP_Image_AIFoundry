@@ -1,7 +1,7 @@
 import base64
 import tempfile
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 import azure.functions as func
 import azurefunctions.extensions.bindings.blob as blob
@@ -16,6 +16,13 @@ from azure.storage.blob import (
 )
 from mcp.types import CallToolResult, ImageContent, TextContent
 from pydantic import BaseModel, Field
+
+from gpt_image import (
+    GPT_IMAGE_MODEL,
+    generate_gpt_image,
+    validate_gpt_parameters,
+    validate_reference_count,
+)
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 urlstorage = os.environ.get("AgentVideoStorage__blobServiceUri", "").rstrip("/")
@@ -94,7 +101,8 @@ def _error_result(message: str) -> CallToolResult:
 
 # Pydantic model for image generation request
 class ImageGenerationRequest(BaseModel):
-    """Request model for image generation using Flux Pro 2"""
+    """Request model for image generation using Flux Pro 2 or GPT Image 2.5."""
+    model: Optional[Literal["flux-pro-2", "gpt-image-2.5"]] = Field(default=None, description="Image model; defaults to flux-pro-2")
     prompt: str = Field(..., description="The text description of the image to generate")
     size: Optional[str] = Field(default="1024x1024", description="The size of the generated image (e.g., '1024x1024')")
     quality: Optional[str] = Field(default="standard", description="The quality of the generated image")
@@ -107,7 +115,8 @@ class ImageGenerationRequest(BaseModel):
 
 # Pydantic model for image editing request
 class ImageEditRequest(BaseModel):
-    """Request model for image editing using Flux Pro 2 or Flux Kontext"""
+    """Request model for image editing using Flux Pro 2, Flux Kontext or GPT Image 2.5."""
+    model: Optional[Literal["flux-pro-2", "flux-kontext", "gpt-image-2.5"]] = Field(default=None, description="Image model; defaults to the existing Flux selection")
     filenames: list[str] = Field(..., description="List of filenames of reference images to use for editing (e.g., ['img-test-scene0-talk0.png', 'img-test-scene1-talk0.png'])")
     prompt: str = Field(..., description="The text description of how to edit the image")
     use_flux_kontext: Optional[bool] = Field(default=False, description="If true, use Flux Kontext model for editing instead of Flux Pro 2")
@@ -122,9 +131,10 @@ class ImageEditRequest(BaseModel):
 
 @app.mcp_tool(use_result_schema=True)
 @app.mcp_tool_property(arg_name="prompt", description="The text description of the image to generate")
-@app.mcp_tool_property(arg_name="size", description="The size of the generated image", is_required=False)
-@app.mcp_tool_property(arg_name="quality", description="The quality of the generated image", is_required=False)
-@app.mcp_tool_property(arg_name="n", description="The number of images to generate", property_type=func.McpPropertyType.INTEGER, is_required=False)
+@app.mcp_tool_property(arg_name="model", description="flux-pro-2 (default) or gpt-image-2.5; GPT uses the configured Foundry deployment", is_required=False)
+@app.mcp_tool_property(arg_name="size", description="Image size (default 1024x1024); GPT accepts auto or dimensions divisible by 16 within its resolution limits", is_required=False)
+@app.mcp_tool_property(arg_name="quality", description="Image quality (default standard); GPT maps standard to auto and accepts low, medium, high, xhigh, max or auto", is_required=False)
+@app.mcp_tool_property(arg_name="n", description="Number of images (default 1); GPT Image currently requires n=1", property_type=func.McpPropertyType.INTEGER, is_required=False)
 @app.mcp_tool_property(arg_name="video_id", description="Video ID for associating generated images with a video", is_required=False)
 @app.mcp_tool_property(arg_name="scene_number", description="Scene number for associating generated images with a scene", property_type=func.McpPropertyType.INTEGER, is_required=False)
 @app.mcp_tool_property(arg_name="talk_number", description="Talk number for associating generated images with a talk", property_type=func.McpPropertyType.INTEGER, is_required=False)
@@ -147,9 +157,10 @@ async def generate_image(
     talk_number: Optional[int] = 0,
     prefix: Optional[str] = "img",
     sas: bool = False,
+    model: Optional[str] = None,
 ) -> CallToolResult:
     """
-    Azure Function with MCP trigger that generates images using Flux Pro 2
+    Azure Function with MCP trigger that generates images using Flux Pro 2 or GPT Image 2.5
     via Azure AI Foundry.
     
     Args:
@@ -163,6 +174,7 @@ async def generate_image(
     try:
         try:
             validated_input = ImageGenerationRequest(
+                model=model,
                 prompt=prompt,
                 size=size,
                 quality=quality,
@@ -188,6 +200,9 @@ async def generate_image(
         talk_number = validated_input.talk_number
         prefix = validated_input.prefix
         sas = validated_input.sas
+        model = validated_input.model or "flux-pro-2"
+        if model == GPT_IMAGE_MODEL:
+            size, quality = validate_gpt_parameters(size, quality, n)
         # Validate required parameters
         if not prompt:
             error_msg = "Missing required parameter: prompt"
@@ -204,32 +219,27 @@ async def generate_image(
             logging.error(error_msg)
             raise RuntimeError(error_msg)
         
-        # Import the image generation client
-        try:
-            from FoundryImageClient import GptImageClient
-        except ImportError as e:
-            error_msg = f"Image client library not available: {str(e)}"
-            logging.error(error_msg)
-            raise RuntimeError(error_msg) from e
-        
-        # Initialize the image client
-        logging.info(f"Initializing Azure OpenAI Image Client for deployment: {deployment_name}")
-        client = GptImageClient(
-            endpoint=endpoint,
-            api_key=api_key,
-            deployment_name=deployment_name,
-            model=GptImageClient.ImageModel.FLUX,
-            output_format="png"
-        )
-        
-        # Generate images asynchronously
-        logging.info(f"Generating {n} image(s) with prompt: {prompt}")
-        result = await client.generate_image_async(
-            prompt=prompt,
-            size=size,
-            quality=quality,
-            n=n
-        )
+        if model == GPT_IMAGE_MODEL:
+            result = await generate_gpt_image(endpoint, api_key, prompt, size, quality, n)
+        else:
+            try:
+                from FoundryImageClient import GptImageClient
+            except ImportError as e:
+                raise RuntimeError(f"Image client library not available: {e}") from e
+
+            client = GptImageClient(
+                endpoint=endpoint,
+                api_key=api_key,
+                deployment_name=deployment_name,
+                model=GptImageClient.ImageModel.FLUX,
+                output_format="png"
+            )
+            result = await client.generate_image_async(
+                prompt=prompt,
+                size=size,
+                quality=quality,
+                n=n
+            )
         if isinstance(result, str):
             # Si c'est un chemin de fichier, lire le fichier
             with open(result, "rb") as file:
@@ -262,10 +272,11 @@ async def generate_image(
 @app.mcp_tool(use_result_schema=True)
 @app.mcp_tool_property(arg_name="filenames", description="List of reference image filenames", property_type=func.McpPropertyType.STRING, as_array=True)
 @app.mcp_tool_property(arg_name="prompt", description="The text description of how to edit the image")
+@app.mcp_tool_property(arg_name="model", description="flux-pro-2, flux-kontext or gpt-image-2.5; omit to preserve the existing Flux selection", is_required=False)
 @app.mcp_tool_property(arg_name="use_flux_kontext", description="Use Flux Kontext instead of Flux Pro 2", property_type=func.McpPropertyType.BOOLEAN, is_required=False)
-@app.mcp_tool_property(arg_name="size", description="The size of the edited image", is_required=False)
-@app.mcp_tool_property(arg_name="quality", description="The quality of the edited image", is_required=False)
-@app.mcp_tool_property(arg_name="n", description="The number of images to generate", property_type=func.McpPropertyType.INTEGER, is_required=False)
+@app.mcp_tool_property(arg_name="size", description="Image size (default 1024x1024); GPT accepts auto or dimensions divisible by 16 within its resolution limits", is_required=False)
+@app.mcp_tool_property(arg_name="quality", description="Image quality (default standard); GPT maps standard to auto and accepts low, medium, high, xhigh, max or auto", is_required=False)
+@app.mcp_tool_property(arg_name="n", description="Number of images (default 1); GPT Image currently requires n=1", property_type=func.McpPropertyType.INTEGER, is_required=False)
 @app.mcp_tool_property(arg_name="video_id", description="Video ID for associating edited images with a video", is_required=False)
 @app.mcp_tool_property(arg_name="scene_number", description="Scene number for associating edited images with a scene", property_type=func.McpPropertyType.INTEGER, is_required=False)
 @app.mcp_tool_property(arg_name="talk_number", description="Talk number for associating edited images with a talk", property_type=func.McpPropertyType.INTEGER, is_required=False)
@@ -296,9 +307,10 @@ async def edit_image(
     talk_number: Optional[int] = 0,
     prefix: Optional[str] = "edited",
     sas: bool = False,
+    model: Optional[str] = None,
 ) -> CallToolResult:
     """
-    Azure Function with MCP trigger that edits images using Flux Pro 2
+    Azure Function with MCP trigger that edits images using Flux Pro 2, Flux Kontext or GPT Image 2.5
     via Azure AI Foundry with multiple reference images.
     
     Args:
@@ -314,6 +326,7 @@ async def edit_image(
     try:
         try:
             validated_input = ImageEditRequest(
+                model=model,
                 filenames=filenames,
                 prompt=prompt,
                 use_flux_kontext=use_flux_kontext,
@@ -344,6 +357,14 @@ async def edit_image(
         talk_number = validated_input.talk_number
         prefix = validated_input.prefix
         sas = validated_input.sas
+        model = validated_input.model
+        if model is not None and use_flux_kontext and model != "flux-kontext":
+            raise ValueError("use_flux_kontext=true conflicts with the selected model")
+        model = model or ("flux-kontext" if use_flux_kontext else "flux-pro-2")
+        use_flux_kontext = model == "flux-kontext"
+        if model == GPT_IMAGE_MODEL:
+            size, quality = validate_gpt_parameters(size, quality, n)
+            validate_reference_count(filenames)
         
         # Validate required parameters
         missing_params = []
@@ -387,58 +408,54 @@ async def edit_image(
             logging.error(error_msg)
             raise RuntimeError(error_msg)
         
-        # Import the image generation client
-        try:
-            from FoundryImageClient import GptImageClient
-        except ImportError as e:
-            error_msg = f"Image client library not available: {str(e)}"
-            logging.error(error_msg)
-            raise RuntimeError(error_msg) from e
-        
-        # Initialize the image client
-        logging.info(f"Initializing Azure OpenAI Image Client for editing with deployment: {deployment_name}")
-        client = GptImageClient(
-            endpoint=endpoint,
-            api_key=api_key,
-            deployment_name=deployment_name,
-            model=GptImageClient.ImageModel.FLUX,
-            output_format="png"
-        )
-        
-        # Edit image asynchronously with multiple reference images
-        logging.info(f"Editing with {len(reference_images)} reference images and prompt: {prompt}")
-        if use_flux_kontext:
-            # edit_image_async expects file paths, so write bytes to files in a temp directory
-            temp_dir = tempfile.TemporaryDirectory()
-            temp_files = []
+        if model == GPT_IMAGE_MODEL:
+            result = await generate_gpt_image(
+                endpoint, api_key, prompt, size, quality, n, images=reference_images
+            )
+        else:
             try:
-                for idx,img_data in enumerate(reference_images):
-                    temp_path = os.path.join(temp_dir.name, f"reference_{idx}.png")
-                    with open(temp_path, "wb") as tmp:
-                        tmp.write(img_data)
-                    temp_files.append(temp_path)
+                from FoundryImageClient import GptImageClient
+            except ImportError as e:
+                raise RuntimeError(f"Image client library not available: {e}") from e
 
-                result = await client.edit_image_async(
-                    image_path=temp_files[0],
+            client = GptImageClient(
+                endpoint=endpoint,
+                api_key=api_key,
+                deployment_name=deployment_name,
+                model=GptImageClient.ImageModel.FLUX,
+                output_format="png"
+            )
+            if use_flux_kontext:
+                temp_dir = tempfile.TemporaryDirectory()
+                temp_files = []
+                try:
+                    for idx, img_data in enumerate(reference_images):
+                        temp_path = os.path.join(temp_dir.name, f"reference_{idx}.png")
+                        with open(temp_path, "wb") as tmp:
+                            tmp.write(img_data)
+                        temp_files.append(temp_path)
+
+                    result = await client.edit_image_async(
+                        image_path=temp_files[0],
+                        prompt=prompt,
+                        additional_images=temp_files[1:] if len(temp_files) > 1 else None,
+                        size=size
+                    )
+                finally:
+                    try:
+                        temp_dir.cleanup()
+                    except OSError as cleanup_error:
+                        logging.warning(
+                            "Failed to clean up temporary directory %s: %s",
+                            temp_dir.name,
+                            cleanup_error,
+                        )
+            else:
+                result = await client.flux2edit_image_async(
+                    images=reference_images,
                     prompt=prompt,
-                    additional_images=temp_files[1:] if len(temp_files) > 1 else None,
                     size=size
                 )
-            finally:
-                try:
-                    temp_dir.cleanup()
-                except OSError as cleanup_error:
-                    logging.warning(
-                        "Failed to clean up temporary directory %s: %s",
-                        temp_dir.name,
-                        cleanup_error,
-                    )
-        else:
-            result = await client.flux2edit_image_async(
-                images=reference_images,
-                prompt=prompt,
-                size=size
-            )
         
         if isinstance(result, str):
             # Si c'est un chemin de fichier, lire le fichier
