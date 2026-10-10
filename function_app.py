@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import binascii
 import tempfile
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
@@ -19,12 +18,10 @@ from azure.storage.blob import (
     generate_blob_sas,
 )
 from mcp.types import CallToolResult, ImageContent, TextContent
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 from gpt_image import (
     GPT_IMAGE_MODEL,
-    MAX_REFERENCE_BYTES,
-    PNG_SIGNATURE,
     generate_gpt_image,
     validate_gpt_parameters,
     validate_reference_count,
@@ -134,37 +131,6 @@ async def _upload_image(
     )
 
 
-def _decode_uploaded_image(image_base64: str) -> bytes:
-    declared_mime = None
-    encoded = image_base64
-    if encoded.startswith("data:"):
-        header, separator, encoded = encoded.partition(",")
-        supported_headers = {
-            "data:image/png;base64": "image/png",
-            "data:image/jpeg;base64": "image/jpeg",
-        }
-        if not separator or header not in supported_headers:
-            raise ValueError("image_base64 data URL must contain a base64 PNG or JPEG image")
-        declared_mime = supported_headers[header]
-    if len(encoded) > 4 * ((MAX_REFERENCE_BYTES + 2) // 3):
-        raise ValueError("Uploaded image must be nonempty and smaller than 50 MB")
-    try:
-        image = base64.b64decode(encoded, validate=True)
-    except (binascii.Error, ValueError) as error:
-        raise ValueError("image_base64 must contain valid base64 image data") from error
-    if not image or len(image) >= MAX_REFERENCE_BYTES:
-        raise ValueError("Uploaded image must be nonempty and smaller than 50 MB")
-    if image.startswith(PNG_SIGNATURE):
-        mime_type = "image/png"
-    elif image.startswith(b"\xff\xd8\xff"):
-        mime_type = "image/jpeg"
-    else:
-        raise ValueError("Uploaded image must be a PNG or JPEG image")
-    if declared_mime is not None and declared_mime != mime_type:
-        raise ValueError("image_base64 data URL MIME type does not match the image")
-    return image
-
-
 # Pydantic model for image generation request
 class ImageGenerationRequest(BaseModel):
     """Request model for image generation using Flux Pro 2 or GPT Image 2.5."""
@@ -182,11 +148,8 @@ class ImageGenerationRequest(BaseModel):
 # Pydantic model for image editing request
 class ImageEditRequest(BaseModel):
     """Request model for image editing using Flux Pro 2, Flux Kontext or GPT Image 2.5."""
-    model_config = ConfigDict(hide_input_in_errors=True)
-
     model: Optional[Literal["flux-pro-2", "flux-kontext", "gpt-image-2.5"]] = Field(default=None, description="Image model; defaults to the existing Flux selection")
-    filenames: list[str] = Field(default_factory=list, description="Optional reference image filenames; provide filenames and/or image_base64")
-    image_base64: Optional[str] = Field(default=None, repr=False, description="Optional uploaded PNG/JPEG as raw base64 or a data URL; smaller than 50 MB")
+    filenames: list[str] = Field(..., description="List of filenames of reference images to use for editing (e.g., ['img-test-scene0-talk0.png', 'img-test-scene1-talk0.png'])")
     prompt: str = Field(..., description="The text description of how to edit the image")
     use_flux_kontext: Optional[bool] = Field(default=False, description="If true, use Flux Kontext model for editing instead of Flux Pro 2")
     size: Optional[str] = Field(default="1024x1024", description="The size of the edited image (e.g., '1024x1024')")
@@ -337,8 +300,7 @@ async def generate_image(
 
 
 @app.mcp_tool(use_result_schema=True)
-@app.mcp_tool_property(arg_name="filenames", description="Optional reference image filenames; provide filenames and/or image_base64", property_type=func.McpPropertyType.STRING, as_array=True, is_required=False)
-@app.mcp_tool_property(arg_name="image_base64", description="Optional uploaded PNG/JPEG as raw base64 or a data:image/png;base64,... or data:image/jpeg;base64,... URL; smaller than 50 MB. Appended after filenames when both are supplied", is_required=False)
+@app.mcp_tool_property(arg_name="filenames", description="List of reference image filenames", property_type=func.McpPropertyType.STRING, as_array=True)
 @app.mcp_tool_property(arg_name="prompt", description="The text description of how to edit the image")
 @app.mcp_tool_property(arg_name="model", description="flux-pro-2, flux-kontext or gpt-image-2.5; omit to preserve the existing Flux selection", is_required=False)
 @app.mcp_tool_property(arg_name="use_flux_kontext", description="Use Flux Kontext instead of Flux Pro 2", property_type=func.McpPropertyType.BOOLEAN, is_required=False)
@@ -358,8 +320,8 @@ async def generate_image(
 async def edit_image(
     context: func.MCPToolContext,
     containerClient: blob.ContainerClient,
-    filenames: Optional[list[str]] = None,
-    prompt: str = "",
+    filenames: list[str],
+    prompt: str,
     use_flux_kontext: Optional[bool] = False,
     size: Optional[str] = "1024x1024",
     quality: Optional[str] = "standard",
@@ -370,7 +332,6 @@ async def edit_image(
     prefix: Optional[str] = "edited",
     sas: bool = False,
     model: Optional[str] = None,
-    image_base64: Optional[str] = None,
 ) -> CallToolResult:
     """
     Azure Function with MCP trigger that edits images using Flux Pro 2, Flux Kontext or GPT Image 2.5
@@ -389,8 +350,7 @@ async def edit_image(
         try:
             validated_input = ImageEditRequest(
                 model=model,
-                filenames=filenames if filenames is not None else [],
-                image_base64=image_base64,
+                filenames=filenames,
                 prompt=prompt,
                 use_flux_kontext=use_flux_kontext,
                 size=size,
@@ -406,14 +366,10 @@ async def edit_image(
             error_msg = f"Image editing validation failed: {str(e)}"
             logging.error(error_msg)
             raise ValueError(error_msg) from e
-        logging.info(
-            "Request arguments: %s",
-            validated_input.model_dump_json(exclude={"image_base64"}),
-        )
-
+        logging.info(f"Request arguments: {validated_input.model_dump_json()}")
+            
         # Extract parameters from arguments
         filenames = validated_input.filenames
-        image_base64 = validated_input.image_base64
         prompt = validated_input.prompt
         use_flux_kontext = validated_input.use_flux_kontext
         size = validated_input.size
@@ -429,21 +385,16 @@ async def edit_image(
             raise ValueError("use_flux_kontext=true conflicts with the selected model")
         model = model or ("flux-kontext" if use_flux_kontext else "flux-pro-2")
         use_flux_kontext = model == "flux-kontext"
-        uploaded_image = (
-            _decode_uploaded_image(image_base64) if image_base64 is not None else None
-        )
         if model == GPT_IMAGE_MODEL:
             size, quality = validate_gpt_parameters(size, quality, n)
-            validate_reference_count(
-                filenames + (["uploaded image"] if uploaded_image is not None else [])
-            )
-
+            validate_reference_count(filenames)
+        
         # Validate required parameters
         missing_params = []
         if not prompt:
             missing_params.append("prompt")
-        if not filenames and uploaded_image is None:
-            missing_params.append("filenames list or image_base64")
+        if not filenames:
+            missing_params.append("filenames list")
         if missing_params:
             error_msg = f"Missing required parameter(s): {', '.join(missing_params)}"
             logging.error(error_msg)
@@ -466,9 +417,7 @@ async def edit_image(
                 error_msg = f"Failed to download image {filename}: {str(e)}"
                 logging.error(error_msg)
                 raise RuntimeError(error_msg) from e
-        if uploaded_image is not None:
-            reference_images.append(uploaded_image)
-
+        
         # Get Azure OpenAI credentials from environment variables
         endpoint = os.environ.get('AZURE_OPENAI_ENDPOINT')
         api_key = os.environ.get('AZURE_OPENAI_API_KEY')
@@ -504,8 +453,7 @@ async def edit_image(
                 temp_files = []
                 try:
                     for idx, img_data in enumerate(reference_images):
-                        extension = "jpg" if img_data.startswith(b"\xff\xd8\xff") else "png"
-                        temp_path = os.path.join(temp_dir.name, f"reference_{idx}.{extension}")
+                        temp_path = os.path.join(temp_dir.name, f"reference_{idx}.png")
                         with open(temp_path, "wb") as tmp:
                             tmp.write(img_data)
                         temp_files.append(temp_path)
