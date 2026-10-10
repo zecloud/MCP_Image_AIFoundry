@@ -291,9 +291,14 @@ curl.exe --fail-with-body --request PUT --upload-file '.\my-reference.jpg' `
 ```
 
 Wait for Blob Storage's **201 Created** response before editing. The SAS does
-not upload or validate the file content itself; clients should supply actual
-PNG/JPEG data compatible with their selected editing model. GPT validates
-reference content and requires each image to be smaller than 50 MB.
+not upload or validate the file content itself and cannot enforce an upload-size
+limit; clients should supply actual PNG/JPEG data compatible with their selected
+editing model. For every model, `edit_image` checks Blob properties before reading
+and rejects empty references or files of **50 MiB (52,428,800 bytes) or more**.
+Downloads are limited to the checked size and conditional on the blob's ETag, so
+an intervening replacement fails instead of bypassing the size check. GPT also
+validates the downloaded PNG/JPEG content. Rejected blobs are not automatically
+deleted; remove them through your storage management process if needed.
 
 Then use the returned `filename` and the same `video_id`:
 ```json
@@ -320,6 +325,8 @@ the MCP endpoint. Treat `upload_url` as a secret; do not log or persist its toke
 Use `filenames` (required, nonempty list of reference image filenames) and `prompt`
 (required). Files are read from `fluxjob/agentvideo/{video_id}/{filename}`. The
 remaining size, quality, naming and SAS parameters are shared with generation.
+All models reject empty references and images of 50 MiB or more before downloading
+image data. Existing larger references must be resized before editing.
 
 `model` accepts `flux-pro-2`, `flux-kontext` or `gpt-image-2.5`. If omitted,
 existing calls still choose Flux Pro 2, or Flux Kontext when

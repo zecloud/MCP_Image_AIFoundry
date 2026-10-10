@@ -299,6 +299,9 @@ class GptMcpTests(unittest.IsolatedAsyncioTestCase):
                 client.edit_image_async = AsyncMock(side_effect=edit)
                 module = types.SimpleNamespace(GptImageClient=MagicMock(return_value=client))
                 container = MagicMock()
+                container.get_blob_client.return_value.get_blob_properties.return_value = types.SimpleNamespace(
+                    size=len(PNG), etag='"reference-etag"',
+                )
                 container.get_blob_client.return_value.download_blob.return_value.readall.return_value = PNG
                 with patch.dict(os.environ, ENVIRONMENT, clear=True), patch.dict(sys.modules, {"FoundryImageClient": module}):
                     result = parse_result(await function_app.edit_image(

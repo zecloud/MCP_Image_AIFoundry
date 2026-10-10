@@ -1,12 +1,18 @@
 import base64
 import json
 import os
+import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, quote, urlsplit
 
-from azure.storage.blob import UserDelegationKey
+from azure.core import MatchConditions
+from azure.core.exceptions import ResourceModifiedError
+from azure.core.pipeline.transport import RequestsTransport, RequestsTransportResponse
+from azure.storage.blob import BlobClient, UserDelegationKey
+from requests import Response
+from requests.structures import CaseInsensitiveDict
 from mcp.types import CallToolResult
 
 import function_app
@@ -194,6 +200,9 @@ class ImageUploadTests(unittest.IsolatedAsyncioTestCase):
 
         def get_blob_client(name):
             client = MagicMock()
+            client.get_blob_properties.side_effect = lambda: types.SimpleNamespace(
+                size=len(blobs[name]), etag='"reference-etag"',
+            )
             client.download_blob.return_value.readall.side_effect = lambda: blobs[name]
             client.upload_blob.side_effect = lambda data, **kwargs: blobs.update({name: data})
             return client
@@ -228,6 +237,134 @@ class ImageUploadTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(prop["isRequired"])
             self.assertEqual(prop["propertyType"], "string")
         self.assertEqual(len(function.get_bindings()), 1)
+
+
+class ReferenceDownloadTests(unittest.IsolatedAsyncioTestCase):
+    async def invoke(self, size, data=b"reference", download_error=None, properties_error=None):
+        blob_client = MagicMock()
+        blob_client.get_blob_properties.return_value = types.SimpleNamespace(
+            size=size, etag='"checked-etag"',
+        )
+        blob_client.get_blob_properties.side_effect = properties_error
+        blob_client.download_blob.return_value.readall.return_value = data
+        blob_client.download_blob.side_effect = download_error
+        container = MagicMock()
+        container.get_blob_client.return_value = blob_client
+        gpt = AsyncMock(return_value=b"edited")
+        flux_client = MagicMock()
+        flux_client.flux2edit_image_async = AsyncMock(return_value=b"edited")
+        flux_client.edit_image_async = AsyncMock(return_value=b"edited")
+        module = types.SimpleNamespace(GptImageClient=MagicMock(return_value=flux_client))
+        with (
+            patch.dict(os.environ, {"AZURE_OPENAI_ENDPOINT": "https://foundry.example",
+                                    "AZURE_OPENAI_API_KEY": "test-key"}),
+            patch.dict("sys.modules", {"FoundryImageClient": module}),
+            patch.object(function_app, "generate_gpt_image", gpt),
+            self.assertLogs(level="ERROR"),
+        ):
+            results = []
+            for model in ("flux-pro-2", "flux-kontext", "gpt-image-2.5"):
+                results.append(parse_result(await function_app.edit_image(
+                    json.dumps({"arguments": {
+                        "model": model, "video_id": "clip", "filenames": ["reference.png"],
+                        "prompt": "Make it brighter",
+                    }}), containerClient=container,
+                )))
+        for result in results:
+            self.assertTrue(result.isError)
+        gpt.assert_not_awaited()
+        flux_client.flux2edit_image_async.assert_not_awaited()
+        flux_client.edit_image_async.assert_not_awaited()
+        blob_client.upload_blob.assert_not_called()
+        blob_client.delete_blob.assert_not_called()
+        return results, blob_client
+
+    async def test_empty_boundary_and_multigigabyte_blobs_are_rejected_before_download(self):
+        for size in (0, function_app.MAX_REFERENCE_BYTES, 5_000 * 1024 * 1024):
+            with self.subTest(size=size):
+                results, blob_client = await self.invoke(size)
+                for result in results:
+                    self.assertIn("nonempty and smaller than 50 MB", result.content[0].text)
+                    self.assertIn("reference.png", result.content[0].text)
+                blob_client.download_blob.assert_not_called()
+                blob_client.download_blob.return_value.readall.assert_not_called()
+
+    def test_valid_download_is_bounded_and_pinned_to_checked_etag(self):
+        for size in (1, 9, function_app.MAX_REFERENCE_BYTES - 1):
+            with self.subTest(size=size):
+                blob_client = MagicMock()
+                blob_client.get_blob_properties.return_value = types.SimpleNamespace(
+                    size=size, etag='"checked-etag"',
+                )
+                data = MagicMock()
+                data.__len__.return_value = size
+                blob_client.download_blob.return_value.readall.return_value = data
+                self.assertIs(function_app._download_reference_image(blob_client), data)
+                blob_client.download_blob.assert_called_once_with(
+                    offset=0, length=size, etag='"checked-etag"',
+                    match_condition=MatchConditions.IfNotModified,
+                )
+
+    async def test_concurrently_replaced_blob_fails_before_reading(self):
+        results, blob_client = await self.invoke(
+            9, download_error=ResourceModifiedError("Blob changed since size check"),
+        )
+        for result in results:
+            self.assertIn("Blob changed since size check", result.content[0].text)
+        blob_client.download_blob.return_value.readall.assert_not_called()
+        self.assertEqual(blob_client.download_blob.call_count, 3)
+        blob_client.download_blob.assert_called_with(
+            offset=0, length=9, etag='"checked-etag"',
+            match_condition=MatchConditions.IfNotModified,
+        )
+
+    async def test_properties_failure_does_not_download_or_generate(self):
+        results, blob_client = await self.invoke(
+            9, properties_error=RuntimeError("Unable to read blob properties"),
+        )
+        for result in results:
+            self.assertIn("Unable to read blob properties", result.content[0].text)
+        blob_client.download_blob.assert_not_called()
+
+    async def test_incomplete_download_is_rejected(self):
+        results, _ = await self.invoke(10, data=b"short")
+        for result in results:
+            self.assertIn("did not match the checked blob size", result.content[0].text)
+
+    def test_real_sdk_sends_head_then_bounded_conditional_get(self):
+        requests = []
+        data = b"reference"
+
+        def send(request, **kwargs):
+            requests.append(request)
+            response = Response()
+            response.status_code = 200 if request.method == "HEAD" else 206
+            response.headers = CaseInsensitiveDict({
+                "Content-Length": str(len(data)),
+                "Content-Type": "image/png",
+                "ETag": '"checked-etag"',
+                "Last-Modified": "Sat, 10 Oct 2026 12:00:00 GMT",
+                "x-ms-blob-type": "BlockBlob",
+            })
+            response._content = b"" if request.method == "HEAD" else data
+            response._content_consumed = True
+            if request.method != "HEAD":
+                response.headers["Content-Range"] = f"bytes 0-{len(data) - 1}/{len(data)}"
+            return RequestsTransportResponse(request, response)
+
+        transport = RequestsTransport()
+        with (
+            patch.object(transport, "send", side_effect=send),
+            BlobClient(
+                account_url=STORAGE_URL, container_name="fluxjob",
+                blob_name="agentvideo/clip/reference.png", credential=None,
+                transport=transport,
+            ) as blob_client,
+        ):
+            self.assertEqual(function_app._download_reference_image(blob_client), data)
+        self.assertEqual([request.method for request in requests], ["HEAD", "GET"])
+        self.assertEqual(requests[1].headers["If-Match"], '"checked-etag"')
+        self.assertEqual(requests[1].headers["x-ms-range"], "bytes=0-8")
 
 
 if __name__ == "__main__":

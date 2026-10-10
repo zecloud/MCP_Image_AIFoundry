@@ -19,6 +19,9 @@ class FakeContainerClient:
 
     def _get_blob_client(self, name):
         client = MagicMock()
+        client.get_blob_properties.return_value = types.SimpleNamespace(
+            size=len(self.reference_image), etag='"reference-etag"',
+        )
         client.download_blob.return_value.readall.return_value = self.reference_image
         client.upload_blob.side_effect = self._upload
         self.blobs[name] = client
@@ -318,6 +321,9 @@ class ImageContentTests(unittest.IsolatedAsyncioTestCase):
         for edit in (False, True):
             with self.subTest(edit=edit):
                 container = MagicMock()
+                container.get_blob_client.return_value.get_blob_properties.return_value = types.SimpleNamespace(
+                    size=len(b"reference-image"), etag='"reference-etag"',
+                )
                 container.get_blob_client.return_value.download_blob.return_value.readall.return_value = b"reference-image"
                 container.get_blob_client.return_value.upload_blob.side_effect = RuntimeError("Upload failed")
                 arguments = {"prompt": "A mountain", "sas": True}

@@ -10,6 +10,7 @@ import azurefunctions.extensions.bindings.blob as blob
 import logging
 import json
 import os
+from azure.core import MatchConditions
 from azure.identity import DefaultAzureCredential, ManagedIdentityCredential
 from azure.storage.blob import (
     BlobSasPermissions,
@@ -22,6 +23,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from gpt_image import (
     GPT_IMAGE_MODEL,
+    MAX_REFERENCE_BYTES,
     generate_gpt_image,
     validate_gpt_parameters,
     validate_reference_count,
@@ -143,6 +145,23 @@ async def _upload_image(
         overwrite=True,
         content_settings=ContentSettings(content_type="image/png"),
     )
+
+
+def _download_reference_image(blob_client) -> bytes:
+    properties = blob_client.get_blob_properties()
+    if not 0 < properties.size < MAX_REFERENCE_BYTES:
+        raise ValueError("Each reference image must be nonempty and smaller than 50 MB")
+    # Pin the checked version and range so a concurrent replacement cannot bypass the limit.
+    download_stream = blob_client.download_blob(
+        offset=0,
+        length=properties.size,
+        etag=properties.etag,
+        match_condition=MatchConditions.IfNotModified,
+    )
+    image_data = download_stream.readall()
+    if len(image_data) != properties.size:
+        raise RuntimeError("Reference image download did not match the checked blob size")
+    return image_data
 
 
 class ImageUploadRequest(BaseModel):
@@ -506,12 +525,12 @@ async def edit_image(
                 # Get blob client for each file from the container
                 blob_client = containerClient.get_blob_client(f"agentvideo/{video_id}/{filename}")
                 
-                # Download the blob content
-                download_stream = blob_client.download_blob()
-                image_data = download_stream.readall()
+                image_data = await asyncio.to_thread(_download_reference_image, blob_client)
                 
                 reference_images.append(image_data)
                 logging.info(f"Downloaded reference image: {filename}")
+            except ValueError as e:
+                raise ValueError(f"Invalid reference image {filename}: {e}") from e
             except Exception as e:
                 error_msg = f"Failed to download image {filename}: {str(e)}"
                 logging.error(error_msg)
