@@ -1,7 +1,9 @@
+import asyncio
 import base64
 import tempfile
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
+from urllib.parse import quote
 
 import azure.functions as func
 import azurefunctions.extensions.bindings.blob as blob
@@ -12,6 +14,7 @@ from azure.identity import DefaultAzureCredential, ManagedIdentityCredential
 from azure.storage.blob import (
     BlobSasPermissions,
     BlobServiceClient,
+    ContentSettings,
     generate_blob_sas,
 )
 from mcp.types import CallToolResult, ImageContent, TextContent
@@ -99,6 +102,35 @@ def _error_result(message: str) -> CallToolResult:
     )
 
 
+def _image_blob_name(
+    video_id: str,
+    prefix: str,
+    scene_number: Optional[int],
+    talk_number: Optional[int],
+) -> str:
+    parts = [prefix, video_id] if prefix else [video_id]
+    if scene_number is not None:
+        parts.append(f"scene{scene_number}")
+    if talk_number is not None:
+        parts.append(f"talk{talk_number}")
+    return f"agentvideo/{video_id}/{'-'.join(parts)}.png"
+
+
+async def _upload_image(
+    container_client: blob.ContainerClient,
+    blob_name: str,
+    image_bytes: bytes,
+) -> None:
+    # A static output binding cannot omit individual filename components.
+    blob_client = container_client.get_blob_client(blob_name)
+    await asyncio.to_thread(
+        blob_client.upload_blob,
+        image_bytes,
+        overwrite=True,
+        content_settings=ContentSettings(content_type="image/png"),
+    )
+
+
 # Pydantic model for image generation request
 class ImageGenerationRequest(BaseModel):
     """Request model for image generation using Flux Pro 2 or GPT Image 2.5."""
@@ -108,9 +140,9 @@ class ImageGenerationRequest(BaseModel):
     quality: Optional[str] = Field(default="standard", description="The quality of the generated image")
     n: Optional[int] = Field(default=1, description="The number of images to generate")
     video_id: Optional[str] = Field(default="test", description="video ID for associating generated images with a video")
-    scene_number: Optional[int] = Field(default=0, description="Scene number for associating generated images with a specific scene in a video")
-    talk_number: Optional[int] = Field(default=0, description="Talk number for associating generated images with a specific talk in a video")
-    prefix: Optional[str] = Field(default="img", description="Prefix for the generated image filenames")
+    scene_number: Optional[int] = Field(default=None, description="Optional scene number; omitted from the filename when absent or null")
+    talk_number: Optional[int] = Field(default=None, description="Optional talk number; omitted from the filename when absent or null")
+    prefix: Optional[str] = Field(default="img", description="Optional filename prefix; defaults to img when absent or null")
     sas: bool = Field(default=False, description="If true, return a read-only SAS URL for the generated image")
 
 # Pydantic model for image editing request
@@ -124,9 +156,9 @@ class ImageEditRequest(BaseModel):
     quality: Optional[str] = Field(default="standard", description="The quality of the edited image")
     n: Optional[int] = Field(default=1, description="The number of images to generate")
     video_id: Optional[str] = Field(default="test", description="video ID for associating edited images with a video")
-    scene_number: Optional[int] = Field(default=0, description="Scene number for associating edited images with a specific scene in a video")
-    talk_number: Optional[int] = Field(default=0, description="Talk number for associating edited images with a specific talk in a video")
-    prefix: Optional[str] = Field(default="edited", description="Prefix for the edited image filenames")
+    scene_number: Optional[int] = Field(default=None, description="Optional scene number; omitted from the filename when absent or null")
+    talk_number: Optional[int] = Field(default=None, description="Optional talk number; omitted from the filename when absent or null")
+    prefix: Optional[str] = Field(default="edited", description="Optional filename prefix; defaults to edited when absent or null")
     sas: bool = Field(default=False, description="If true, return a read-only SAS URL for the edited image")
 
 @app.mcp_tool(use_result_schema=True)
@@ -136,25 +168,25 @@ class ImageEditRequest(BaseModel):
 @app.mcp_tool_property(arg_name="quality", description="Image quality (default standard); GPT maps standard to auto and accepts low, medium, high, xhigh, max or auto", is_required=False)
 @app.mcp_tool_property(arg_name="n", description="Number of images (default 1); GPT Image currently requires n=1", property_type=func.McpPropertyType.INTEGER, is_required=False)
 @app.mcp_tool_property(arg_name="video_id", description="Video ID for associating generated images with a video", is_required=False)
-@app.mcp_tool_property(arg_name="scene_number", description="Scene number for associating generated images with a scene", property_type=func.McpPropertyType.INTEGER, is_required=False)
-@app.mcp_tool_property(arg_name="talk_number", description="Talk number for associating generated images with a talk", property_type=func.McpPropertyType.INTEGER, is_required=False)
-@app.mcp_tool_property(arg_name="prefix", description="Prefix for the generated image filename", is_required=False)
+@app.mcp_tool_property(arg_name="scene_number", description="Optional scene number; omitted from the filename when absent or null", property_type=func.McpPropertyType.INTEGER, is_required=False)
+@app.mcp_tool_property(arg_name="talk_number", description="Optional talk number; omitted from the filename when absent or null", property_type=func.McpPropertyType.INTEGER, is_required=False)
+@app.mcp_tool_property(arg_name="prefix", description="Optional filename prefix (default img); use an empty string for no prefix", is_required=False)
 @app.mcp_tool_property(arg_name="sas", description="Return a read-only SAS URL for the generated image", property_type=func.McpPropertyType.BOOLEAN, is_required=False)
-@app.blob_output(
-    arg_name="outputBlob",
-    path=blob_container_name + "/agentvideo/{arguments.video_id}/{arguments.prefix}-{arguments.video_id}-scene{arguments.scene_number}-talk{arguments.talk_number}.png",
+@app.blob_input(
+    arg_name="containerClient",
+    path=blob_container_name,
     connection="AgentVideoStorage"
 )
 async def generate_image(
     context: func.MCPToolContext,
-    outputBlob: func.Out[bytes],
+    containerClient: blob.ContainerClient,
     prompt: str,
     size: Optional[str] = "1024x1024",
     quality: Optional[str] = "standard",
     n: Optional[int] = 1,
     video_id: Optional[str] = "test",
-    scene_number: Optional[int] = 0,
-    talk_number: Optional[int] = 0,
+    scene_number: Optional[int] = None,
+    talk_number: Optional[int] = None,
     prefix: Optional[str] = "img",
     sas: bool = False,
     model: Optional[str] = None,
@@ -165,6 +197,7 @@ async def generate_image(
     
     Args:
         context: The MCP tool invocation context containing the request arguments
+        containerClient: ContainerClient to upload the generated image
         
     Returns:
         CallToolResult: The image URL and generated PNG content
@@ -195,10 +228,10 @@ async def generate_image(
         size = validated_input.size
         quality = validated_input.quality
         n = validated_input.n
-        video_id = validated_input.video_id
+        video_id = validated_input.video_id if validated_input.video_id is not None else "test"
         scene_number = validated_input.scene_number
         talk_number = validated_input.talk_number
-        prefix = validated_input.prefix
+        prefix = validated_input.prefix if validated_input.prefix is not None else "img"
         sas = validated_input.sas
         model = validated_input.model or "flux-pro-2"
         if model == GPT_IMAGE_MODEL:
@@ -247,14 +280,11 @@ async def generate_image(
         else:
             # Sinon, c'est déjà des bytes
             image_bytes = result
-        outputBlob.set(image_bytes)
+        blob_name = _image_blob_name(video_id, prefix, scene_number, talk_number)
+        await _upload_image(containerClient, blob_name, image_bytes)
 
-        logging.info(f"Image generation completed successfully")
-        blob_name = (
-            f"agentvideo/{video_id}/"
-            f"{prefix}-{video_id}-scene{scene_number}-talk{talk_number}.png"
-        )
-        blob_url = f"{urlstorage}/{blob_container_name}/{blob_name}"
+        logging.info("Image generation completed successfully")
+        blob_url = f"{urlstorage}/{blob_container_name}/{quote(blob_name, safe='/')}"
         if sas:
             blob_url = _append_read_sas(blob_url, blob_name)
         return _success_result(image_bytes, blob_url)
@@ -278,24 +308,18 @@ async def generate_image(
 @app.mcp_tool_property(arg_name="quality", description="Image quality (default standard); GPT maps standard to auto and accepts low, medium, high, xhigh, max or auto", is_required=False)
 @app.mcp_tool_property(arg_name="n", description="Number of images (default 1); GPT Image currently requires n=1", property_type=func.McpPropertyType.INTEGER, is_required=False)
 @app.mcp_tool_property(arg_name="video_id", description="Video ID for associating edited images with a video", is_required=False)
-@app.mcp_tool_property(arg_name="scene_number", description="Scene number for associating edited images with a scene", property_type=func.McpPropertyType.INTEGER, is_required=False)
-@app.mcp_tool_property(arg_name="talk_number", description="Talk number for associating edited images with a talk", property_type=func.McpPropertyType.INTEGER, is_required=False)
-@app.mcp_tool_property(arg_name="prefix", description="Prefix for the edited image filename", is_required=False)
+@app.mcp_tool_property(arg_name="scene_number", description="Optional scene number; omitted from the filename when absent or null", property_type=func.McpPropertyType.INTEGER, is_required=False)
+@app.mcp_tool_property(arg_name="talk_number", description="Optional talk number; omitted from the filename when absent or null", property_type=func.McpPropertyType.INTEGER, is_required=False)
+@app.mcp_tool_property(arg_name="prefix", description="Optional filename prefix (default edited); use an empty string for no prefix", is_required=False)
 @app.mcp_tool_property(arg_name="sas", description="Return a read-only SAS URL for the edited image", property_type=func.McpPropertyType.BOOLEAN, is_required=False)
 @app.blob_input(
     arg_name="containerClient",
     path=blob_container_name,
     connection="AgentVideoStorage"
 )
-@app.blob_output(
-    arg_name="outputBlob",
-    path=blob_container_name + "/agentvideo/{arguments.video_id}/{arguments.prefix}-{arguments.video_id}-scene{arguments.scene_number}-talk{arguments.talk_number}.png",
-    connection="AgentVideoStorage"
-)
 async def edit_image(
     context: func.MCPToolContext,
     containerClient: blob.ContainerClient,
-    outputBlob: func.Out[bytes],
     filenames: list[str],
     prompt: str,
     use_flux_kontext: Optional[bool] = False,
@@ -303,8 +327,8 @@ async def edit_image(
     quality: Optional[str] = "standard",
     n: Optional[int] = 1,
     video_id: Optional[str] = "test",
-    scene_number: Optional[int] = 0,
-    talk_number: Optional[int] = 0,
+    scene_number: Optional[int] = None,
+    talk_number: Optional[int] = None,
     prefix: Optional[str] = "edited",
     sas: bool = False,
     model: Optional[str] = None,
@@ -315,8 +339,7 @@ async def edit_image(
     
     Args:
         context: The MCP tool invocation context containing the request arguments
-        containerClient: ContainerClient to access multiple blobs in the container
-        outputBlob: The output blob for the edited image
+        containerClient: ContainerClient to read references and upload the edited image
         
     Returns:
         CallToolResult: The image URL and edited PNG content
@@ -352,10 +375,10 @@ async def edit_image(
         size = validated_input.size
         quality = validated_input.quality
         n = validated_input.n
-        video_id = validated_input.video_id
+        video_id = validated_input.video_id if validated_input.video_id is not None else "test"
         scene_number = validated_input.scene_number
         talk_number = validated_input.talk_number
-        prefix = validated_input.prefix
+        prefix = validated_input.prefix if validated_input.prefix is not None else "edited"
         sas = validated_input.sas
         model = validated_input.model
         if model is not None and use_flux_kontext and model != "flux-kontext":
@@ -465,14 +488,11 @@ async def edit_image(
             # Sinon, c'est déjà des bytes
             image_bytes = result
             
-        outputBlob.set(image_bytes)
+        blob_name = _image_blob_name(video_id, prefix, scene_number, talk_number)
+        await _upload_image(containerClient, blob_name, image_bytes)
 
-        logging.info(f"Image editing completed successfully")
-        blob_name = (
-            f"agentvideo/{video_id}/"
-            f"{prefix}-{video_id}-scene{scene_number}-talk{talk_number}.png"
-        )
-        blob_url = f"{urlstorage}/{blob_container_name}/{blob_name}"
+        logging.info("Image editing completed successfully")
+        blob_url = f"{urlstorage}/{blob_container_name}/{quote(blob_name, safe='/')}"
         if sas:
             blob_url = _append_read_sas(blob_url, blob_name)
         return _success_result(
