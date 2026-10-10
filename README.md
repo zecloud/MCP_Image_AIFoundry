@@ -13,6 +13,7 @@ This Azure Function application provides MCP tools for image generation and mult
 - **Pydantic Strong Typing**: Type-safe tool properties using Pydantic models
 - **FLUX Integration**: Uses Azure OpenAI Image Client for Flux Pro 2 and Flux Kontext
 - **GPT Image 2.5 Integration**: Uses the asynchronous OpenAI SDK with the same Foundry resource endpoint and API key; selectable per call without changing existing FLUX calls
+- **Optional Image Upload**: Edit a base64 PNG/JPEG directly, alone or alongside existing Blob Storage references
 - **Async Image Generation**: Non-blocking asynchronous image generation
 - **Error Handling**: Comprehensive error handling and logging
 - **Health Check**: Dedicated health check MCP tool
@@ -75,7 +76,8 @@ python -m unittest discover -s test -p "test_*.py" -q
 
 The tests cover the actual OpenAI SDK using a mocked HTTP transport (JSON generation,
 multipart multi-reference editing, response decoding, rate-limit behavior and client
-cleanup), MCP model selection, validation, Blob/SAS output and FLUX compatibility.
+cleanup), MCP model selection, validation, optional base64 uploads (alone or with
+stored references), Blob/SAS output and FLUX compatibility.
 
 For a live smoke test, configure `local.settings.json`, start the Functions host,
 and use an MCP client to invoke the examples below. These calls use your existing
@@ -227,16 +229,65 @@ GPT parameters:
 
 **Tool Name:** `edit_image`
 
-Use `filenames` (required, nonempty list of reference image filenames) and `prompt`
-(required). Files are read from `fluxjob/agentvideo/{video_id}/{filename}`. The
-remaining size, quality, naming and SAS parameters are shared with generation.
+Use `prompt` (required) and at least one reference source:
+
+- `filenames` (optional, array of strings): Existing reference image filenames,
+  read from `fluxjob/agentvideo/{video_id}/{filename}`.
+- `image_base64` (optional, string): One uploaded PNG/JPEG image, supplied as raw
+  base64 or a `data:image/png;base64,...` / `data:image/jpeg;base64,...` URL.
+  The decoded image must be nonempty and smaller than 50 MB. Invalid base64,
+  unsupported image signatures and mismatched data URL MIME types are rejected
+  before storage access or an image API request. Host/client request-size limits
+  may be lower, and base64 adds roughly 33% to the payload size.
+
+Supply either source or both. When both are supplied, the uploaded image is
+appended **after** the stored references, preserving the order of `filenames`.
+Omit `filenames` (or send `[]`) to edit an uploaded image without pre-uploading it
+to Blob Storage. The uploaded reference is used in memory (temporarily written
+for Flux Kontext) and is not saved to Blob Storage; only the edited output is
+stored. Upload data is excluded from application request logs. The
+`reference_images_used` response field counts both reference sources.
+
+The remaining size, quality, naming and SAS parameters are shared with generation.
+Omit unused optional fields rather than sending JSON `null`.
 
 `model` accepts `flux-pro-2`, `flux-kontext` or `gpt-image-2.5`. If omitted,
 existing calls still choose Flux Pro 2, or Flux Kontext when
 `use_flux_kontext=true`. An explicit non-Kontext model combined with
 `use_flux_kontext=true` is rejected rather than silently choosing a provider.
-GPT editing accepts 1–16 PNG/JPEG references, each nonempty and smaller than
-50 MB. All references are submitted in a single multipart edit request.
+GPT editing accepts 1–16 PNG/JPEG references in total (including the upload),
+each nonempty and smaller than 50 MB. All references are submitted in a single
+multipart edit request.
+
+Upload-only example (replace the placeholder with the file's base64 content):
+
+```json
+{
+  "name": "edit_image",
+  "arguments": {
+    "image_base64": "<base64-encoded PNG or JPEG>",
+    "prompt": "Keep the subject unchanged and replace the background with a sunset",
+    "sas": true
+  }
+}
+```
+
+An MCP client can prepare the argument from a local file with Python:
+
+```python
+import base64
+from pathlib import Path
+
+arguments = {
+    "prompt": "Keep the subject unchanged and replace the background with a sunset",
+    "image_base64": base64.b64encode(Path("reference.jpg").read_bytes()).decode("ascii"),
+}
+# Pass arguments to your MCP client's call_tool("edit_image", arguments).
+```
+
+This is an MCP argument, not a filesystem path, multipart HTTP endpoint or file
+picker. The client's UI/agent must encode the selected file. The upload works
+with all three editing models; existing filename-only calls remain unchanged.
 
 ```json
 {
