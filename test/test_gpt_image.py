@@ -299,6 +299,9 @@ class GptMcpTests(unittest.IsolatedAsyncioTestCase):
                 client.edit_image_async = AsyncMock(side_effect=edit)
                 module = types.SimpleNamespace(GptImageClient=MagicMock(return_value=client))
                 container = MagicMock()
+                container.get_blob_client.return_value.get_blob_properties.return_value = types.SimpleNamespace(
+                    size=len(PNG), etag='"reference-etag"',
+                )
                 container.get_blob_client.return_value.download_blob.return_value.readall.return_value = PNG
                 with patch.dict(os.environ, ENVIRONMENT, clear=True), patch.dict(sys.modules, {"FoundryImageClient": module}):
                     result = parse_result(await function_app.edit_image(
@@ -375,7 +378,11 @@ class GptMcpTests(unittest.IsolatedAsyncioTestCase):
         client.assert_not_called()
 
     def test_mcp_schema_exposes_model_and_optional_naming(self):
-        for function in function_app.app.get_functions():
+        with patch.object(function_app.app, "functions_bindings", {}):
+            functions = function_app.app.get_functions()
+        for function in functions:
+            if function.get_function_name() not in ("generate_image", "edit_image"):
+                continue
             trigger = function.get_trigger().get_dict_repr()
             properties = trigger["toolProperties"]
             if isinstance(properties, str):

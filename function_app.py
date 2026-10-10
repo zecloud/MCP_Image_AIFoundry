@@ -3,13 +3,14 @@ import base64
 import tempfile
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import azure.functions as func
 import azurefunctions.extensions.bindings.blob as blob
 import logging
 import json
 import os
+from azure.core import MatchConditions
 from azure.identity import DefaultAzureCredential, ManagedIdentityCredential
 from azure.storage.blob import (
     BlobSasPermissions,
@@ -18,10 +19,11 @@ from azure.storage.blob import (
     generate_blob_sas,
 )
 from mcp.types import CallToolResult, ImageContent, TextContent
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from gpt_image import (
     GPT_IMAGE_MODEL,
+    MAX_REFERENCE_BYTES,
     generate_gpt_image,
     validate_gpt_parameters,
     validate_reference_count,
@@ -31,6 +33,7 @@ app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 urlstorage = os.environ.get("AgentVideoStorage__blobServiceUri", "").rstrip("/")
 blob_container_name = "fluxjob"
 read_sas_lifetime = timedelta(hours=1)
+upload_sas_lifetime = timedelta(minutes=5)
 
 
 def _get_storage_credential():
@@ -43,15 +46,20 @@ def _get_storage_credential():
     return ManagedIdentityCredential(client_id=client_id)
 
 
-def _append_read_sas(blob_url: str, blob_name: str) -> str:
+def _create_blob_sas(
+    blob_name: str,
+    permission: BlobSasPermissions,
+    lifetime: timedelta,
+    **sas_options,
+) -> tuple[str, datetime]:
     if not urlstorage:
         raise RuntimeError(
             "AgentVideoStorage__blobServiceUri is required to generate a SAS URL"
         )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
     start_time = now - timedelta(minutes=5)
-    expiry_time = now + read_sas_lifetime
+    expiry_time = now + lifetime
     credential = _get_storage_credential()
     try:
         with BlobServiceClient(
@@ -67,13 +75,21 @@ def _append_read_sas(blob_url: str, blob_name: str) -> str:
                 container_name=blob_container_name,
                 blob_name=blob_name,
                 user_delegation_key=delegation_key,
-                permission=BlobSasPermissions(read=True),
+                permission=permission,
                 start=start_time,
                 expiry=expiry_time,
+                **sas_options,
             )
     finally:
         credential.close()
 
+    return sas_token, expiry_time
+
+
+def _append_read_sas(blob_url: str, blob_name: str) -> str:
+    sas_token, _ = _create_blob_sas(
+        blob_name, BlobSasPermissions(read=True), read_sas_lifetime
+    )
     return f"{blob_url}?{sas_token}"
 
 
@@ -129,6 +145,108 @@ async def _upload_image(
         overwrite=True,
         content_settings=ContentSettings(content_type="image/png"),
     )
+
+
+def _download_reference_image(blob_client) -> bytes:
+    properties = blob_client.get_blob_properties()
+    if not 0 < properties.size < MAX_REFERENCE_BYTES:
+        raise ValueError("Each reference image must be nonempty and smaller than 50 MB")
+    # Pin the checked version and range so a concurrent replacement cannot bypass the limit.
+    download_stream = blob_client.download_blob(
+        offset=0,
+        length=properties.size,
+        etag=properties.etag,
+        match_condition=MatchConditions.IfNotModified,
+    )
+    image_data = download_stream.readall()
+    if len(image_data) != properties.size:
+        raise RuntimeError("Reference image download did not match the checked blob size")
+    return image_data
+
+
+class ImageUploadRequest(BaseModel):
+    """Identify a single new reference image in an existing video's folder."""
+    video_id: str = Field(..., strict=True, min_length=1, max_length=128)
+    filename: str = Field(..., strict=True, min_length=1, max_length=255)
+
+    @field_validator("video_id", "filename")
+    @classmethod
+    def validate_path_component(cls, value: str) -> str:
+        if (
+            value != value.strip()
+            or value in (".", "..")
+            or value.endswith(".")
+            or any(char in value for char in "/\\?#%")
+            or any(ord(char) < 32 or ord(char) == 127 for char in value)
+        ):
+            raise ValueError("Use a single path component without separators or URL syntax")
+        return value
+
+    @field_validator("filename")
+    @classmethod
+    def validate_image_extension(cls, value: str) -> str:
+        if os.path.splitext(value)[1].lower() not in (".png", ".jpg", ".jpeg"):
+            raise ValueError("Upload filename must end in .png, .jpg or .jpeg")
+        return value
+
+
+@app.mcp_tool(use_result_schema=True)
+@app.mcp_tool_property(arg_name="video_id", description="Video ID whose agentvideo folder will receive the uploaded reference image")
+@app.mcp_tool_property(arg_name="filename", description="New PNG or JPEG reference filename without a path; pass this filename to edit_image after uploading")
+async def get_image_upload_sas(
+    context: func.MCPToolContext,
+    video_id: str,
+    filename: str,
+) -> CallToolResult:
+    """Get a five-minute, HTTPS-only SAS to create one reference image for edit_image."""
+    try:
+        request = ImageUploadRequest(video_id=video_id, filename=filename)
+    except ValueError as error:
+        return _error_result(f"Invalid request: {error}")
+
+    try:
+        storage_url = urlsplit(urlstorage)
+        if (
+            storage_url.scheme != "https"
+            or not storage_url.netloc
+            or storage_url.path not in ("", "/")
+            or storage_url.query or storage_url.fragment
+            or storage_url.username or storage_url.password
+        ):
+            raise RuntimeError("An HTTPS Blob service endpoint is required")
+        blob_name = f"agentvideo/{request.video_id}/{request.filename}"
+        sas_token, expires_at = await asyncio.to_thread(
+            _create_blob_sas,
+            blob_name,
+            BlobSasPermissions(create=True),
+            upload_sas_lifetime,
+            protocol="https",
+        )
+        blob_url = f"{urlstorage}/{blob_container_name}/{quote(blob_name, safe='/')}"
+        content_type = (
+            "image/png" if request.filename.lower().endswith(".png") else "image/jpeg"
+        )
+        response = {
+            "status": "success",
+            "video_id": request.video_id,
+            "filename": request.filename,
+            "blob_name": blob_name,
+            "blob_url": blob_url,
+            "upload_url": f"{blob_url}?{sas_token}",
+            "expires_at": expires_at.isoformat(),
+            "method": "PUT",
+            "headers": {
+                "x-ms-blob-type": "BlockBlob",
+                "Content-Type": content_type,
+            },
+        }
+        return CallToolResult(content=[TextContent(type="text", text=json.dumps(response))])
+    except Exception as error:
+        logging.error("Unable to create image upload SAS (%s)", type(error).__name__)
+        return _error_result(
+            "Error creating image upload SAS: check AgentVideoStorage__blobServiceUri "
+            "and the managed identity's storage permissions"
+        )
 
 
 # Pydantic model for image generation request
@@ -407,12 +525,12 @@ async def edit_image(
                 # Get blob client for each file from the container
                 blob_client = containerClient.get_blob_client(f"agentvideo/{video_id}/{filename}")
                 
-                # Download the blob content
-                download_stream = blob_client.download_blob()
-                image_data = download_stream.readall()
+                image_data = await asyncio.to_thread(_download_reference_image, blob_client)
                 
                 reference_images.append(image_data)
                 logging.info(f"Downloaded reference image: {filename}")
+            except ValueError as e:
+                raise ValueError(f"Invalid reference image {filename}: {e}") from e
             except Exception as e:
                 error_msg = f"Failed to download image {filename}: {str(e)}"
                 logging.error(error_msg)
