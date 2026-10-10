@@ -8,12 +8,13 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+from jsonschema import Draft202012Validator
 from openai import AsyncOpenAI, RateLimitError
 from mcp.types import CallToolResult
 
 import function_app
 import gpt_image
-from test_image_content import FakeOutputBlob
+from test_image_content import FakeContainerClient
 
 
 PNG = base64.b64decode(
@@ -186,9 +187,7 @@ class GptSdkTests(unittest.IsolatedAsyncioTestCase):
 
 class GptMcpTests(unittest.IsolatedAsyncioTestCase):
     async def invoke(self, arguments, edit=False, image=PNG):
-        output = FakeOutputBlob()
-        container = MagicMock()
-        container.get_blob_client.return_value.download_blob.return_value.readall.return_value = image
+        output = container = FakeContainerClient(image)
         with (
             patch.dict(os.environ, ENVIRONMENT, clear=True),
             patch.object(function_app, "urlstorage", "https://storage.example"),
@@ -197,9 +196,9 @@ class GptMcpTests(unittest.IsolatedAsyncioTestCase):
         ):
             context = json.dumps({"arguments": arguments})
             if edit:
-                response = await function_app.edit_image(context, containerClient=container, outputBlob=output)
+                response = await function_app.edit_image(context, containerClient=container)
             else:
-                response = await function_app.generate_image(context, outputBlob=output)
+                response = await function_app.generate_image(context, containerClient=container)
         return parse_result(response), output, container, generate, sas
 
     async def test_generation_routes_gpt_and_preserves_response(self):
@@ -212,7 +211,10 @@ class GptMcpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.content[1].mimeType, "image/png")
         self.assertEqual(json.loads(result.content[0].text)["image"], "https://storage.example/image.png?sp=r")
         generate.assert_awaited_once_with(ENVIRONMENT["AZURE_OPENAI_ENDPOINT"], "test-key", "A", "1024x1024", "auto", 1)
-        sas.assert_called_once()
+        sas.assert_called_once_with(
+            "https://storage.example/fluxjob/agentvideo/test/img-test.png",
+            "agentvideo/test/img-test.png",
+        )
 
     async def test_edit_routes_gpt_with_references_and_metadata(self):
         result, output, container, generate, _ = await self.invoke({
@@ -223,7 +225,7 @@ class GptMcpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(output.value, PNG)
         self.assertEqual(json.loads(result.content[0].text)["reference_images_used"], 2)
         self.assertEqual([call.args[0] for call in container.get_blob_client.call_args_list], [
-            "agentvideo/clip/one.png", "agentvideo/clip/two.png",
+            "agentvideo/clip/one.png", "agentvideo/clip/two.png", "agentvideo/clip/edited-clip.png",
         ])
         generate.assert_awaited_once_with(ENVIRONMENT["AZURE_OPENAI_ENDPOINT"], "test-key", "A", "1536x864", "max", 1, images=[PNG, PNG])
 
@@ -251,9 +253,9 @@ class GptMcpTests(unittest.IsolatedAsyncioTestCase):
             patch.dict(os.environ, ENVIRONMENT, clear=True),
             patch.object(function_app, "generate_gpt_image", new_callable=AsyncMock, side_effect=RuntimeError("GPT Image did not return a PNG image")),
         ):
-            output = FakeOutputBlob()
+            output = FakeContainerClient()
             result = parse_result(await function_app.generate_image(
-                json.dumps({"arguments": {"model": "gpt-image-2.5", "prompt": "A"}}), outputBlob=output,
+                json.dumps({"arguments": {"model": "gpt-image-2.5", "prompt": "A"}}), containerClient=output,
             ))
         self.assertTrue(result.isError)
         self.assertIn("did not return a PNG", result.content[0].text)
@@ -264,25 +266,24 @@ class GptMcpTests(unittest.IsolatedAsyncioTestCase):
         client.generate_image_async = AsyncMock(return_value=b"flux-generated")
         client.flux2edit_image_async = AsyncMock(return_value=b"flux-edited")
         module = types.SimpleNamespace(GptImageClient=MagicMock(return_value=client))
-        container = MagicMock()
-        container.get_blob_client.return_value.download_blob.return_value.readall.return_value = b"reference"
+        output = container = FakeContainerClient(b"reference")
         with (
             patch.dict(os.environ, ENVIRONMENT, clear=True),
             patch.dict(sys.modules, {"FoundryImageClient": module}),
             patch.object(function_app, "generate_gpt_image", new_callable=AsyncMock) as gpt,
         ):
-            output = FakeOutputBlob()
             result = parse_result(await function_app.generate_image(
-                json.dumps({"arguments": {"prompt": "A", "model": "flux-pro-2"}}), outputBlob=output,
+                json.dumps({"arguments": {"prompt": "A", "model": "flux-pro-2"}}), containerClient=output,
             ))
             self.assertFalse(result.isError)
             self.assertEqual(output.value, b"flux-generated")
             client.generate_image_async.assert_awaited_once_with(prompt="A", size="1024x1024", quality="standard", n=1)
             result = parse_result(await function_app.edit_image(
                 json.dumps({"arguments": {"prompt": "A", "filenames": ["r.png"], "model": "flux-pro-2"}}),
-                containerClient=container, outputBlob=output,
+                containerClient=container,
             ))
             self.assertFalse(result.isError)
+            self.assertEqual(output.value, b"flux-edited")
             client.flux2edit_image_async.assert_awaited_once_with(images=[b"reference"], prompt="A", size="1024x1024")
             gpt.assert_not_awaited()
 
@@ -302,7 +303,7 @@ class GptMcpTests(unittest.IsolatedAsyncioTestCase):
                 with patch.dict(os.environ, ENVIRONMENT, clear=True), patch.dict(sys.modules, {"FoundryImageClient": module}):
                     result = parse_result(await function_app.edit_image(
                         json.dumps({"arguments": {"prompt": "A", "filenames": ["one.png", "two.png"], **selection}}),
-                        containerClient=container, outputBlob=FakeOutputBlob(),
+                        containerClient=container,
                     ))
                 self.assertFalse(result.isError)
                 self.assertEqual(module.GptImageClient.call_args.kwargs["deployment_name"], "flux-kontext")
@@ -328,8 +329,6 @@ class GptMcpTests(unittest.IsolatedAsyncioTestCase):
                 **kwargs,
             )
 
-        container = MagicMock()
-        container.get_blob_client.return_value.download_blob.return_value.readall.return_value = PNG
         with (
             patch.dict(os.environ, ENVIRONMENT, clear=True),
             patch.object(gpt_image, "AsyncOpenAI", side_effect=make_client),
@@ -338,15 +337,15 @@ class GptMcpTests(unittest.IsolatedAsyncioTestCase):
             for edit in (False, True):
                 with self.subTest(edit=edit):
                     arguments = {"model": "gpt-image-2.5", "prompt": "A"}
-                    output = FakeOutputBlob()
+                    output = FakeContainerClient(PNG)
                     if edit:
                         arguments["filenames"] = ["r.png"]
                         response = await function_app.edit_image(
-                            json.dumps({"arguments": arguments}), containerClient=container, outputBlob=output,
+                            json.dumps({"arguments": arguments}), containerClient=output,
                         )
                     else:
                         response = await function_app.generate_image(
-                            json.dumps({"arguments": arguments}), outputBlob=output,
+                            json.dumps({"arguments": arguments}), containerClient=output,
                         )
                     result = parse_result(response)
                     self.assertFalse(result.isError)
@@ -360,9 +359,7 @@ class GptMcpTests(unittest.IsolatedAsyncioTestCase):
         ])
 
     async def test_invalid_reference_does_not_submit_or_write(self):
-        output = FakeOutputBlob()
-        container = MagicMock()
-        container.get_blob_client.return_value.download_blob.return_value.readall.return_value = b"bad reference"
+        output = container = FakeContainerClient(b"bad reference")
         with (
             patch.dict(os.environ, ENVIRONMENT, clear=True),
             patch.object(gpt_image, "AsyncOpenAI") as client,
@@ -370,14 +367,14 @@ class GptMcpTests(unittest.IsolatedAsyncioTestCase):
             result = parse_result(await function_app.edit_image(
                 json.dumps({"arguments": {
                     "model": "gpt-image-2.5", "prompt": "A", "filenames": ["bad.png"],
-                }}), containerClient=container, outputBlob=output,
+                }}), containerClient=container,
             ))
         self.assertTrue(result.isError)
         self.assertIn("PNG or JPEG", result.content[0].text)
         self.assertIsNone(output.value)
         client.assert_not_called()
 
-    def test_mcp_schema_exposes_model(self):
+    def test_mcp_schema_exposes_model_and_optional_naming(self):
         for function in function_app.app.get_functions():
             trigger = function.get_trigger().get_dict_repr()
             properties = trigger["toolProperties"]
@@ -386,6 +383,32 @@ class GptMcpTests(unittest.IsolatedAsyncioTestCase):
             model_property = next(prop for prop in properties if prop["propertyName"] == "model")
             self.assertEqual(model_property["propertyType"], "string")
             self.assertFalse(model_property["isRequired"])
+            properties = {prop["propertyName"]: prop for prop in properties}
+            naming_properties = {}
+            for name, property_type in (("scene_number", "integer"), ("talk_number", "integer"), ("prefix", "string")):
+                self.assertFalse(properties[name]["isRequired"])
+                self.assertEqual(properties[name]["propertyType"], property_type)
+                self.assertNotIn("null", properties[name]["description"].lower())
+                naming_properties[name] = {"type": properties[name]["propertyType"]}
+            # Match the host's single-type schema for the emitted naming metadata.
+            naming_schema = {
+                "type": "object",
+                "properties": naming_properties,
+                "required": [name for name in naming_properties if properties[name]["isRequired"]],
+            }
+            Draft202012Validator.check_schema(naming_schema)
+            validator = Draft202012Validator(naming_schema)
+            for arguments in ({}, {"scene_number": 0}, {"talk_number": 0}, {"prefix": ""}, {"prefix": "cover"}, {"scene_number": 1, "talk_number": 2}):
+                self.assertTrue(validator.is_valid(arguments), arguments)
+            for name in naming_properties:
+                self.assertFalse(validator.is_valid({name: None}), name)
+            bindings = [binding.get_dict_repr() for binding in function.get_bindings()]
+            blob_bindings = [binding for binding in bindings if binding["type"] == "blob"]
+            self.assertEqual(len(blob_bindings), 1)
+            self.assertEqual(blob_bindings[0]["name"], "containerClient")
+            self.assertEqual(blob_bindings[0]["path"], "fluxjob")
+            self.assertEqual(blob_bindings[0]["direction"].name, "IN")
+            self.assertEqual(blob_bindings[0]["connection"], "AgentVideoStorage")
 
 
 if __name__ == "__main__":
