@@ -13,6 +13,7 @@ This Azure Function application provides MCP tools for image generation and mult
 - **Pydantic Strong Typing**: Type-safe tool properties using Pydantic models
 - **FLUX Integration**: Uses Azure OpenAI Image Client for Flux Pro 2 and Flux Kontext
 - **GPT Image 2.5 Integration**: Uses the asynchronous OpenAI SDK with the same Foundry resource endpoint and API key; selectable per call without changing existing FLUX calls
+- **Optional Reference Upload**: Five-minute, blob-scoped, create-only SAS URLs for uploading PNG/JPEG references before editing
 - **Async Image Generation**: Non-blocking asynchronous image generation
 - **Error Handling**: Comprehensive error handling and logging
 - **Health Check**: Dedicated health check MCP tool
@@ -64,6 +65,7 @@ func start
 The MCP server will expose the following tools:
 - `generate_image` - Generate images using Flux Pro 2 (default) or GPT Image 2.5
 - `edit_image` - Edit images with multiple references using Flux Pro 2 (default), Flux Kontext or GPT Image 2.5
+- `get_image_upload_sas` - Get a five-minute SAS URL to upload one new reference image into an existing video's folder
 
 ## Testing
 
@@ -75,7 +77,8 @@ python -m unittest discover -s test -p "test_*.py" -q
 
 The tests cover the actual OpenAI SDK using a mocked HTTP transport (JSON generation,
 multipart multi-reference editing, response decoding, rate-limit behavior and client
-cleanup), MCP model selection, validation, Blob/SAS output and FLUX compatibility.
+cleanup), MCP model selection, validation, Blob/SAS output, upload SAS scope,
+permissions, expiration, client cleanup, uploaded-reference editing and FLUX compatibility.
 
 For a live smoke test, configure `local.settings.json`, start the Functions host,
 and use an MCP client to invoke the examples below. These calls use your existing
@@ -223,6 +226,93 @@ GPT parameters:
 }
 ```
 
+### Upload a reference image (optional)
+
+**Tool Name:** `get_image_upload_sas`
+
+This optional step lets a client upload a local image before calling `edit_image`.
+Existing editing calls using images already in storage are unchanged. Uploads go
+to the existing `fluxjob` container, under `agentvideo/{video_id}/{filename}`;
+no container named after the video is created.
+
+**Tool Properties:**
+- `video_id` (required, string): Video folder identifier, 1–128 characters
+- `filename` (required, string): New reference filename, 1–255 characters, ending
+  in `.png`, `.jpg` or `.jpeg` (case-insensitive)
+
+Both identifiers must be single path components: no `/`, `\`, URL syntax
+(`?`, `#`, `%`), control characters, surrounding whitespace or trailing dots.
+Use a unique filename when uploading multiple versions of a reference.
+
+**Example MCP Tool Call:**
+```json
+{
+  "name": "get_image_upload_sas",
+  "arguments": {
+    "video_id": "clip",
+    "filename": "my-reference.jpg"
+  }
+}
+```
+
+The result contains one MCP text block with JSON metadata, not image content.
+Example decoded metadata (the SAS token is illustrative):
+```json
+{
+  "status": "success",
+  "video_id": "clip",
+  "filename": "my-reference.jpg",
+  "blob_name": "agentvideo/clip/my-reference.jpg",
+  "blob_url": "https://your-storage.blob.core.windows.net/fluxjob/agentvideo/clip/my-reference.jpg",
+  "upload_url": "https://your-storage.blob.core.windows.net/fluxjob/agentvideo/clip/my-reference.jpg?<sas-token>",
+  "expires_at": "2026-10-10T12:05:00+00:00",
+  "method": "PUT",
+  "headers": {
+    "x-ms-blob-type": "BlockBlob",
+    "Content-Type": "image/jpeg"
+  }
+}
+```
+
+The user delegation SAS expires **five minutes after issuance**, uses HTTPS only,
+and grants **create (`c`) access to this single blob**. It cannot read, list,
+delete or overwrite existing blobs. Its start time is backdated five minutes to
+allow for clock skew. If an upload fails because the filename already exists,
+request another SAS using a new filename. If it expires before upload, request
+a fresh SAS. The unsigned `blob_url` does not grant public read access.
+
+Upload the raw file bytes in a **single PUT** using the returned method and
+headers; do not send multipart/form-data, JSON or base64. For example, in PowerShell:
+```powershell
+$uploadUrl = '<upload_url returned by the tool>'
+curl.exe --fail-with-body --request PUT --upload-file '.\my-reference.jpg' `
+  --header 'x-ms-blob-type: BlockBlob' `
+  --header 'Content-Type: image/jpeg' "$uploadUrl"
+```
+
+Wait for Blob Storage's **201 Created** response before editing. The SAS does
+not upload or validate the file content itself; clients should supply actual
+PNG/JPEG data compatible with their selected editing model. GPT validates
+reference content and requires each image to be smaller than 50 MB.
+
+Then use the returned `filename` and the same `video_id`:
+```json
+{
+  "name": "edit_image",
+  "arguments": {
+    "video_id": "clip",
+    "filenames": ["my-reference.jpg"],
+    "prompt": "Keep the subject and replace the background with a sunset"
+  }
+}
+```
+
+Uploaded references can be combined with existing references in `filenames`.
+For browser uploads, configure Blob service **CORS** to allow the client origin,
+`PUT`, and the returned request headers (and `OPTIONS` preflight). A SAS does not
+bypass storage firewall/private endpoint rules or the need to authenticate to
+the MCP endpoint. Treat `upload_url` as a secret; do not log or persist its token.
+
 ### Edit Image Tool
 
 **Tool Name:** `edit_image`
@@ -296,11 +386,22 @@ Make sure to configure the application settings in Azure:
 - `AZURE_GPT_IMAGE_DEPLOYMENT_NAME` (required only when selecting GPT Image)
 - `AgentVideoStorage__blobServiceUri`
 
-Generating SAS URLs requires the Function App managed identity to have the
-**Storage Blob Delegator** role on the storage account. The `AgentVideoStorage`
-container binding supplies the SDK client used to read references and upload
-images with dynamic filenames. The `fluxjob` container must exist, and the
-identity still needs write access (for example **Storage Blob Data Contributor**).
+Generating read or upload SAS URLs requires permission to obtain a user
+delegation key at **storage-account scope** (for example **Storage Blob Delegator**)
+and the corresponding blob data access. The Function App identity needs read/write
+access to `fluxjob` (for example **Storage Blob Data Contributor**). That role at
+storage-account scope also includes the delegation-key permission; when data access
+is scoped only to the container, add **Storage Blob Delegator** at account scope.
+The `AgentVideoStorage` container binding supplies the SDK client used to read
+references and upload images with dynamic filenames. The `fluxjob` container must
+already exist. Upload SAS generation does not create containers or access account keys.
+
+`AgentVideoStorage__blobServiceUri` must be the HTTPS Blob service endpoint,
+for example `https://your-storage.blob.core.windows.net`. For a user-assigned
+identity, set `AgentVideoStorage__clientId` (or `AZURE_CLIENT_ID`). Local development
+uses `DefaultAzureCredential` when `AZURE_FUNCTIONS_ENVIRONMENT=Development`;
+production uses `ManagedIdentityCredential`. Local credentials need the same
+storage permissions as the managed identity.
 
 ## Project Structure
 
@@ -323,7 +424,7 @@ MCP_Image_AIFoundry/
 
 - `azure-functions>=1.26.0b3`: Azure Functions Python worker
 - `azure-identity`: Passwordless authentication with the Function App managed identity
-- `azure-storage-blob`: Read-only user delegation SAS generation
+- `azure-storage-blob`: Blob access and read-only/create-only user delegation SAS generation
 - `azureopenaigptimageclient`: Azure OpenAI Image Client for FLUX
 - `openai>=2.32.0,<3`: Async GPT Image generation and multipart editing
 - `pydantic>=2.0.0`: Data validation and settings management
