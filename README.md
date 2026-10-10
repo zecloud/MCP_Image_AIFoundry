@@ -97,9 +97,9 @@ A live Foundry request is not part of the unit tests.
 - `quality` (optional, string): Image quality, default is "standard"
 - `n` (optional, number): Default is 1. GPT Image calls accept only `n=1` in this version because the MCP tool writes and returns a single image; other values are rejected before generation. Existing FLUX behavior is unchanged.
 - `video_id` (optional, string): Storage folder and filename identifier; defaults to `test`
-- `scene_number` (optional, integer): Adds `-scene<number>` only when provided; absent or `null` values are omitted
-- `talk_number` (optional, integer): Adds `-talk<number>` only when provided; absent or `null` values are omitted
-- `prefix` (optional, string): Filename prefix; defaults to `img` for generation and `edited` for editing, including when `null`. Use `""` to omit the prefix entirely.
+- `scene_number` (optional, integer): Adds `-scene<number>` only when provided; omit the argument to exclude this component
+- `talk_number` (optional, integer): Adds `-talk<number>` only when provided; omit the argument to exclude this component
+- `prefix` (optional, string): Filename prefix; defaults to `img` for generation and `edited` for editing when omitted. Use `""` to omit the prefix entirely.
 - `sas` (optional, boolean): When `true`, return a read-only SAS URL valid for 60 minutes; default is `false`
 
 ### Image filenames
@@ -108,11 +108,16 @@ Both tools store PNG files under `fluxjob/agentvideo/{video_id}/`. Only supplied
 scene/talk numbers appear in the name, independently; explicit `0` is preserved.
 Existing calls that supply both numbers keep their current filenames.
 
+These naming arguments are optional, not nullable, in the published MCP input
+schema. Omit unused arguments instead of sending JSON `null`; schema-validating
+clients reject `null` before the function runs. Internal Python `None` defaults
+do not make the public MCP fields nullable.
+
 Examples with `video_id="clip"`:
 
 | Naming arguments | Generation filename | Editing filename |
 | --- | --- | --- |
-| None | `img-clip.png` | `edited-clip.png` |
+| All naming arguments omitted | `img-clip.png` | `edited-clip.png` |
 | `prefix="cover"` | `cover-clip.png` | `cover-clip.png` |
 | `scene_number=0` | `img-clip-scene0.png` | `edited-clip-scene0.png` |
 | `talk_number=2` | `img-clip-talk2.png` | `edited-clip-talk2.png` |

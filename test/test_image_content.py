@@ -253,11 +253,10 @@ class ImageContentTests(unittest.IsolatedAsyncioTestCase):
     async def test_optional_naming_matches_blob_url_and_sas_for_both_tools(self):
         cases = [
             ({}, "{prefix}-clip.png"),
-            ({"scene_number": None, "talk_number": None, "prefix": None}, "{prefix}-clip.png"),
             ({"scene_number": 0, "talk_number": 0}, "{prefix}-clip-scene0-talk0.png"),
             ({"scene_number": 3}, "{prefix}-clip-scene3.png"),
             ({"talk_number": 0}, "{prefix}-clip-talk0.png"),
-            ({"scene_number": 0, "talk_number": None}, "{prefix}-clip-scene0.png"),
+            ({"scene_number": 0}, "{prefix}-clip-scene0.png"),
             ({"prefix": "cover"}, "cover-clip.png"),
             ({"prefix": "cover", "scene_number": 1, "talk_number": 2}, "cover-clip-scene1-talk2.png"),
             ({"prefix": ""}, "clip.png"),

@@ -140,9 +140,9 @@ class ImageGenerationRequest(BaseModel):
     quality: Optional[str] = Field(default="standard", description="The quality of the generated image")
     n: Optional[int] = Field(default=1, description="The number of images to generate")
     video_id: Optional[str] = Field(default="test", description="video ID for associating generated images with a video")
-    scene_number: Optional[int] = Field(default=None, description="Optional scene number; omitted from the filename when absent or null")
-    talk_number: Optional[int] = Field(default=None, description="Optional talk number; omitted from the filename when absent or null")
-    prefix: Optional[str] = Field(default="img", description="Optional filename prefix; defaults to img when absent or null")
+    scene_number: Optional[int] = Field(default=None, description="Optional scene number; omit the argument to exclude it from the filename")
+    talk_number: Optional[int] = Field(default=None, description="Optional talk number; omit the argument to exclude it from the filename")
+    prefix: Optional[str] = Field(default="img", description="Optional filename prefix; defaults to img when omitted")
     sas: bool = Field(default=False, description="If true, return a read-only SAS URL for the generated image")
 
 # Pydantic model for image editing request
@@ -156,9 +156,9 @@ class ImageEditRequest(BaseModel):
     quality: Optional[str] = Field(default="standard", description="The quality of the edited image")
     n: Optional[int] = Field(default=1, description="The number of images to generate")
     video_id: Optional[str] = Field(default="test", description="video ID for associating edited images with a video")
-    scene_number: Optional[int] = Field(default=None, description="Optional scene number; omitted from the filename when absent or null")
-    talk_number: Optional[int] = Field(default=None, description="Optional talk number; omitted from the filename when absent or null")
-    prefix: Optional[str] = Field(default="edited", description="Optional filename prefix; defaults to edited when absent or null")
+    scene_number: Optional[int] = Field(default=None, description="Optional scene number; omit the argument to exclude it from the filename")
+    talk_number: Optional[int] = Field(default=None, description="Optional talk number; omit the argument to exclude it from the filename")
+    prefix: Optional[str] = Field(default="edited", description="Optional filename prefix; defaults to edited when omitted")
     sas: bool = Field(default=False, description="If true, return a read-only SAS URL for the edited image")
 
 @app.mcp_tool(use_result_schema=True)
@@ -168,9 +168,9 @@ class ImageEditRequest(BaseModel):
 @app.mcp_tool_property(arg_name="quality", description="Image quality (default standard); GPT maps standard to auto and accepts low, medium, high, xhigh, max or auto", is_required=False)
 @app.mcp_tool_property(arg_name="n", description="Number of images (default 1); GPT Image currently requires n=1", property_type=func.McpPropertyType.INTEGER, is_required=False)
 @app.mcp_tool_property(arg_name="video_id", description="Video ID for associating generated images with a video", is_required=False)
-@app.mcp_tool_property(arg_name="scene_number", description="Optional scene number; omitted from the filename when absent or null", property_type=func.McpPropertyType.INTEGER, is_required=False)
-@app.mcp_tool_property(arg_name="talk_number", description="Optional talk number; omitted from the filename when absent or null", property_type=func.McpPropertyType.INTEGER, is_required=False)
-@app.mcp_tool_property(arg_name="prefix", description="Optional filename prefix (default img); use an empty string for no prefix", is_required=False)
+@app.mcp_tool_property(arg_name="scene_number", description="Optional scene number; omit the argument to exclude it from the filename", property_type=func.McpPropertyType.INTEGER, is_required=False)
+@app.mcp_tool_property(arg_name="talk_number", description="Optional talk number; omit the argument to exclude it from the filename", property_type=func.McpPropertyType.INTEGER, is_required=False)
+@app.mcp_tool_property(arg_name="prefix", description="Optional filename prefix (default img when omitted); use an empty string for no prefix", is_required=False)
 @app.mcp_tool_property(arg_name="sas", description="Return a read-only SAS URL for the generated image", property_type=func.McpPropertyType.BOOLEAN, is_required=False)
 @app.blob_input(
     arg_name="containerClient",
@@ -308,9 +308,9 @@ async def generate_image(
 @app.mcp_tool_property(arg_name="quality", description="Image quality (default standard); GPT maps standard to auto and accepts low, medium, high, xhigh, max or auto", is_required=False)
 @app.mcp_tool_property(arg_name="n", description="Number of images (default 1); GPT Image currently requires n=1", property_type=func.McpPropertyType.INTEGER, is_required=False)
 @app.mcp_tool_property(arg_name="video_id", description="Video ID for associating edited images with a video", is_required=False)
-@app.mcp_tool_property(arg_name="scene_number", description="Optional scene number; omitted from the filename when absent or null", property_type=func.McpPropertyType.INTEGER, is_required=False)
-@app.mcp_tool_property(arg_name="talk_number", description="Optional talk number; omitted from the filename when absent or null", property_type=func.McpPropertyType.INTEGER, is_required=False)
-@app.mcp_tool_property(arg_name="prefix", description="Optional filename prefix (default edited); use an empty string for no prefix", is_required=False)
+@app.mcp_tool_property(arg_name="scene_number", description="Optional scene number; omit the argument to exclude it from the filename", property_type=func.McpPropertyType.INTEGER, is_required=False)
+@app.mcp_tool_property(arg_name="talk_number", description="Optional talk number; omit the argument to exclude it from the filename", property_type=func.McpPropertyType.INTEGER, is_required=False)
+@app.mcp_tool_property(arg_name="prefix", description="Optional filename prefix (default edited when omitted); use an empty string for no prefix", is_required=False)
 @app.mcp_tool_property(arg_name="sas", description="Return a read-only SAS URL for the edited image", property_type=func.McpPropertyType.BOOLEAN, is_required=False)
 @app.blob_input(
     arg_name="containerClient",

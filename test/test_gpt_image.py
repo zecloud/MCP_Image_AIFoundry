@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+from jsonschema import Draft202012Validator
 from openai import AsyncOpenAI, RateLimitError
 from mcp.types import CallToolResult
 
@@ -383,9 +384,24 @@ class GptMcpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(model_property["propertyType"], "string")
             self.assertFalse(model_property["isRequired"])
             properties = {prop["propertyName"]: prop for prop in properties}
+            naming_properties = {}
             for name, property_type in (("scene_number", "integer"), ("talk_number", "integer"), ("prefix", "string")):
                 self.assertFalse(properties[name]["isRequired"])
                 self.assertEqual(properties[name]["propertyType"], property_type)
+                self.assertNotIn("null", properties[name]["description"].lower())
+                naming_properties[name] = {"type": properties[name]["propertyType"]}
+            # Match the host's single-type schema for the emitted naming metadata.
+            naming_schema = {
+                "type": "object",
+                "properties": naming_properties,
+                "required": [name for name in naming_properties if properties[name]["isRequired"]],
+            }
+            Draft202012Validator.check_schema(naming_schema)
+            validator = Draft202012Validator(naming_schema)
+            for arguments in ({}, {"scene_number": 0}, {"talk_number": 0}, {"prefix": ""}, {"prefix": "cover"}, {"scene_number": 1, "talk_number": 2}):
+                self.assertTrue(validator.is_valid(arguments), arguments)
+            for name in naming_properties:
+                self.assertFalse(validator.is_valid({name: None}), name)
             bindings = [binding.get_dict_repr() for binding in function.get_bindings()]
             blob_bindings = [binding for binding in bindings if binding["type"] == "blob"]
             self.assertEqual(len(blob_bindings), 1)
